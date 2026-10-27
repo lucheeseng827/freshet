@@ -1,0 +1,4 @@
+# This `target/` is a dbt project's artifact directory (manifest.json, run_results.json),
+# checked in as a test fixture — not a Cargo build directory. Re-include it past the
+# repository-wide `target/` rule.
+!target/

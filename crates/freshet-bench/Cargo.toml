@@ -1,0 +1,51 @@
+[package]
+name = "freshet-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Deterministic project generators, a criterion suite and exporters for comparing Freshet with dbt and SQLMesh."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_bench"
+path = "src/lib.rs"
+
+# Writes one generated topology as dbt / SQLMesh / Freshet projects.
+[[bin]]
+name = "freshet-bench-export"
+path = "src/bin/freshet-bench-export.rs"
+
+# Folds scripts/compare.sh's raw timing files into a `BenchManifest` JSON, so the
+# median/MAD arithmetic and the schema live in tested code rather than in shell.
+[[bin]]
+name = "freshet-bench-manifest"
+path = "src/bin/freshet-bench-manifest.rs"
+
+[dependencies]
+freshet-api = { workspace = true }
+freshet-core = { workspace = true }
+freshet-sql = { workspace = true }
+freshet-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Both already in this crate's normal graph through freshet-sql (same pinned
+# sqlparser 0.52 + "visitor"), so the exporters add no crate to the lock file. The
+# exporters use the tokenizer + relation visitor to rewrite table references in
+# place, not a second SQL engine.
+anyhow = { workspace = true }
+sqlparser = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+# The CLI's own AST-canonical fingerprinter: the edit the comparison applies must be
+# a change `freshet plan` actually sees, so the test checks it with the same code.
+freshet-fingerprint = { workspace = true }
+
+# harness=false -> the bench is a plain binary built ONLY by `cargo bench`, never by
+# `cargo build`. The lib and the bins reference no criterion symbol.
+[[bench]]
+name = "freshet_bench"
+harness = false

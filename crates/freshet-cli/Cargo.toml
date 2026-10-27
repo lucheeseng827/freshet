@@ -1,0 +1,47 @@
+[package]
+name = "freshet-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The freshet CLI: what a SQL change must rebuild (models, columns, partitions), as a plan any orchestrator can run."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+# The product is Freshet; the crate keeps its structural name (freshet-cli) so the
+# crate tree still reads as what it is.
+[[bin]]
+name = "freshet"
+path = "src/main.rs"
+
+[dependencies]
+freshet-embed = { workspace = true }
+freshet-dbt = { workspace = true } # `freshet explain --against <dbt project>`
+freshet-api = { workspace = true }
+freshet-sql = { workspace = true }
+freshet-state = { workspace = true }
+freshet-core = { workspace = true }
+freshet-fingerprint = { workspace = true }
+freshet-incremental = { workspace = true }
+freshet-render = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# `freshet submit`, and hosted state (`--state https://…`). Optional so the
+# default-off lane exists at all: with `--no-default-features` the binary carries no
+# HTTP client and no TLS stack, which is what a CI image that only ever plans against
+# a local state file wants. On by default because this is a binary, not an embeddable
+# library — there is no downstream to protect, and a demo subcommand missing from
+# `--help` is a worse default than a slightly larger binary. One client for both
+# features: hosted state reuses this dependency rather than adding another.
+ureq = { version = "3", optional = true }
+
+[features]
+default = ["submit", "hosted"]
+submit = ["dep:ureq"]
+# `--state` may name a hosted state API (dagron Cloud's `/state/v1`) instead of a file.
+hosted = ["dep:ureq"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

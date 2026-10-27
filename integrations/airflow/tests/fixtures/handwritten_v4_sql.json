@@ -1,0 +1,62 @@
+{
+  "models": [
+    {
+      "name": "events",
+      "reason": "directly_changed",
+      "unit": { "partitions": ["2026-06-20"] },
+      "depends_on": [],
+      "replace": {
+        "strategy": "insert_overwrite",
+        "partition_column": "dt",
+        "target": { "partitions": ["2026-06-20"] }
+      },
+      "sql": {
+        "dialect": "postgres",
+        "statements": [
+          "DELETE FROM events WHERE dt IN ('2026-06-20')",
+          "INSERT INTO events SELECT * FROM (SELECT id, user_id, dt, seen_at AS last_seen FROM raw_events) AS freshet_src WHERE dt IN ('2026-06-20')"
+        ],
+        "atomic": true
+      }
+    },
+    {
+      "name": "daily_rollup",
+      "reason": { "downstream": { "because_of": "events", "via_columns": ["dt"] } },
+      "unit": { "partitions": ["2026-06-20"] },
+      "depends_on": ["events"],
+      "replace": {
+        "strategy": "merge",
+        "unique_key": ["dt"],
+        "target": { "partitions": ["2026-06-20"] }
+      },
+      "sql": {
+        "dialect": "postgres",
+        "statements": [
+          "MERGE INTO daily_rollup AS t USING (SELECT * FROM (SELECT dt, count(*) AS n FROM events GROUP BY dt) AS freshet_src WHERE dt IN ('2026-06-20')) AS s ON t.dt = s.dt WHEN MATCHED THEN UPDATE SET n = s.n WHEN NOT MATCHED THEN INSERT (dt, n) VALUES (s.dt, s.n)"
+        ],
+        "atomic": true
+      }
+    },
+    {
+      "name": "user_dim",
+      "reason": { "downstream": { "because_of": "events", "via_columns": ["last_seen", "user_id"] } },
+      "unit": "full_model",
+      "depends_on": ["events"],
+      "replace": {
+        "strategy": "full_refresh",
+        "target": "whole",
+        "widened": { "widened_because": "not_incremental", "materialization": "table" }
+      },
+      "sql": {
+        "dialect": "postgres",
+        "statements": [
+          "DROP TABLE IF EXISTS user_dim__freshet_new",
+          "CREATE TABLE user_dim__freshet_new AS SELECT user_id, max(last_seen) AS last_seen, '{}'::jsonb AS traits FROM events GROUP BY user_id",
+          "DROP TABLE IF EXISTS user_dim",
+          "ALTER TABLE user_dim__freshet_new RENAME TO user_dim"
+        ],
+        "atomic": false
+      }
+    }
+  ]
+}

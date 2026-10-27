@@ -1,0 +1,37 @@
+{
+  "models": [
+    {
+      "name": "events",
+      "reason": "directly_changed",
+      "unit": { "partitions": ["2026-06-20"] },
+      "depends_on": [],
+      "replace": {
+        "strategy": "insert_overwrite",
+        "partition_column": "dt",
+        "target": { "partitions": ["2026-06-20"] }
+      }
+    },
+    {
+      "name": "daily_rollup",
+      "reason": { "downstream": { "because_of": "events", "via_columns": ["dt"] } },
+      "unit": { "partitions": ["2026-06-20"] },
+      "depends_on": ["events"],
+      "replace": {
+        "strategy": "merge",
+        "unique_key": ["dt"],
+        "target": { "partitions": ["2026-06-20"] }
+      }
+    },
+    {
+      "name": "user_dim",
+      "reason": { "downstream": { "because_of": "events", "via_columns": ["last_seen", "user_id"] } },
+      "unit": "full_model",
+      "depends_on": ["events"],
+      "replace": {
+        "strategy": "full_refresh",
+        "target": "whole",
+        "widened": { "widened_because": "not_incremental", "materialization": "table" }
+      }
+    }
+  ]
+}

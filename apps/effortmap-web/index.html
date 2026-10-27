@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Effort map — what a rebuild of the data layer costs</title>
+<meta name="description" content="Point it at a directory of SQL models: what a change rebuilds, what it costs in compute units, and the queue that would run it. The planner runs as WebAssembly in the page — no server, no upload, nothing leaves the browser.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Effort map</h1>
+  <p class="lede">What rebuilding the data layer costs, and the queue that would do it.</p>
+  <div class="status">
+    <span class="dot" id="engine-dot"></span>
+    <span id="engine-status">loading the planner…</span>
+  </div>
+</header>
+
+<noscript>
+  <div class="note bad">
+    This page is the planner itself, compiled to WebAssembly, so it needs JavaScript.
+    Nothing is sent anywhere — the reason it runs here is that your SQL never leaves
+    the browser.
+  </div>
+</noscript>
+
+<!-- ── the project ─────────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>Project</h2>
+  <p class="hint">
+    A directory of <code>.sql</code> files, one model per file. Nothing is uploaded:
+    the planner runs in this page, and the files are read locally.
+  </p>
+  <div class="row">
+    <button id="pick-dir" hidden>Choose a folder…</button>
+    <label class="filebtn" id="pick-files-label">
+      Choose a folder…
+      <input type="file" id="pick-files" webkitdirectory directory multiple>
+    </label>
+    <button id="load-example">Load the example project</button>
+    <span id="project-status" style="color:var(--ink-muted);font-size:13px"></span>
+  </div>
+
+  <details id="advanced">
+    <summary>Sources and materializations</summary>
+    <div class="row" style="margin-top:12px">
+      <div class="grow">
+        <label class="field" for="sources">
+          Sources — columns of tables the project reads but does not define
+        </label>
+        <textarea id="sources" spellcheck="false" placeholder='{"raw_orders": ["order_id", "amount", "order_day"]}'></textarea>
+        <p class="hint" style="margin-top:6px">
+          Without these, columns from those tables cannot be resolved and the planner
+          assumes they changed — which over-selects rather than under-selects.
+        </p>
+      </div>
+      <div class="grow">
+        <label class="field" for="materializations">Materializations</label>
+        <textarea id="materializations" spellcheck="false" placeholder='{"events": "incremental"}'></textarea>
+        <p class="hint" style="margin-top:6px">
+          Anything unnamed is a <code>table</code>. Only <code>incremental</code> models
+          are partition-scopable, so a project with no hints rebuilds every model whole.
+        </p>
+      </div>
+    </div>
+    <p class="hint">
+      A <code>sources.json</code> or <code>materializations.json</code> in the folder is
+      picked up automatically.
+    </p>
+  </details>
+</section>
+
+<!-- ── what to ask ─────────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>Plan</h2>
+  <div class="row">
+    <fieldset>
+      <label><input type="radio" name="mode" value="code" checked> Code changes</label>
+      <label><input type="radio" name="mode" value="restate"> Data restatement</label>
+    </fieldset>
+  </div>
+  <div class="row" id="restate-controls" hidden>
+    <div class="grow">
+      <label class="field" for="restate-model">Model</label>
+      <select id="restate-model"></select>
+    </div>
+    <div class="grow">
+      <label class="field" for="restate-partitions">Partitions, one per line</label>
+      <textarea id="restate-partitions" spellcheck="false" placeholder="2026-09-01&#10;2026-09-02"></textarea>
+    </div>
+  </div>
+  <div class="row">
+    <button class="primary" id="run" disabled>Plan</button>
+    <span id="plan-status" style="color:var(--ink-muted);font-size:13px"></span>
+  </div>
+</section>
+
+<div id="result" hidden>
+  <div class="stats" id="stats"></div>
+  <p id="origin-line" style="color:var(--ink-muted);font-size:13.5px;margin:0"></p>
+
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-effort" aria-selected="true" aria-controls="panel-effort">Effort map</button>
+    <button role="tab" id="tab-breakdown" aria-selected="false" aria-controls="panel-breakdown">Breakdown</button>
+    <button role="tab" id="tab-queue" aria-selected="false" aria-controls="panel-queue">Queue</button>
+  </div>
+
+  <section class="tabpanel" id="panel-effort" role="tabpanel" aria-labelledby="tab-effort">
+    <div class="chart" id="effort-chart"></div>
+    <div class="scroll"><table id="effort-table"></table></div>
+  </section>
+
+  <section class="tabpanel" id="panel-breakdown" role="tabpanel" aria-labelledby="tab-breakdown" hidden>
+    <h3>Partition scoping</h3>
+    <p class="hint">
+      Models the planner scoped to specific partitions. Each partition becomes its own
+      work item — this is where a rebuild stops being all-or-nothing.
+    </p>
+    <div id="breakdown"></div>
+
+    <h3>Concurrency waves</h3>
+    <p class="hint">
+      Every item in a wave can run at the same time; a wave starts once the one before
+      it finishes. This is the shape of the rebuild, not its duration — nothing here is
+      measured in time.
+    </p>
+    <div class="chart" id="wave-chart"></div>
+    <div class="scroll"><table id="wave-table"></table></div>
+  </section>
+
+  <section class="tabpanel" id="panel-queue" role="tabpanel" aria-labelledby="tab-queue" hidden>
+    <p class="hint">
+      The work items in execution order. Draining them in <code>#</code> order is always
+      dependency-safe; running a whole wave at a time is the parallel form.
+      <strong>Waits on</strong> is model-level: an item waits on every in-plan upstream
+      of its model, which stays correct under lookback windows where partition-to-partition
+      edges would not.
+    </p>
+    <div class="row" style="margin-bottom:14px">
+      <button id="download-queue">Download queue (NDJSON)</button>
+      <button id="download-plan">Download plan (JSON)</button>
+    </div>
+    <div class="scroll"><table id="queue-table"></table></div>
+    <div id="commit-area"></div>
+  </section>
+</div>
+
+<!-- ── state ───────────────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>State</h2>
+  <p class="hint">
+    Fingerprints recording which code has been built. They live in this browser only —
+    a teammate opening this page has their own. Export the file and commit it to share
+    one answer across a team.
+  </p>
+  <div class="row">
+    <span id="state-status" style="color:var(--ink-muted);font-size:13px"></span>
+  </div>
+  <div class="row">
+    <button id="export-state" disabled>Export state.json</button>
+    <label class="filebtn">
+      Import state.json…
+      <input type="file" id="import-state" accept=".json,application/json">
+    </label>
+    <button id="clear-state">Forget state</button>
+  </div>
+</section>
+
+<footer>
+  <p>
+    Cost is a prediction read off a rate card, in compute units — <strong>1 CU is one
+    full rebuild of one <code>table</code> model</strong>. There is no benchmark behind
+    it and no figure on this page is measured in seconds. <code>mCU</code> is the exact
+    integer the planner computed; <code>CU</code> is that divided by 1000 for display.
+  </p>
+  <p>
+    The planner is Rust compiled to WebAssembly and runs entirely in this page. No SQL,
+    no file and no fingerprint is sent anywhere, because there is nowhere to send it to.
+  </p>
+</footer>
+
+</div>
+<script type="module" src="assets/app.js"></script>
+</body>
+</html>

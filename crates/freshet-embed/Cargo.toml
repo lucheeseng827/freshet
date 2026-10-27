@@ -1,0 +1,24 @@
+[package]
+name = "freshet-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Freshet's JSON funnel and frozen wire contract: the one entry point the CLI, daemon and every binding call."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_embed"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-api = { workspace = true }   # the embeddable facade (BackfillPlanner, plan/commit)
+freshet-core = { workspace = true }  # BackfillPlan/Reason/Unit/Materialization (mirrored to wire)
+freshet-sql = { workspace = true }   # build_project + Catalog (SQL -> lineage)
+freshet-state = { workspace = true } # StateSnapshot is serde-capable and crosses the wire as-is
+freshet-incremental = { workspace = true }
+freshet-render = { workspace = true }   # contract v4: `sql` on a plan model, when the request asks
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

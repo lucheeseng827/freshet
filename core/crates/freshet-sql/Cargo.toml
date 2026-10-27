@@ -1,0 +1,18 @@
+[package]
+name = "freshet-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQL to lineage for Freshet: each model's dependencies and per-column upstream, derived with sqlparser."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_sql"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-core = { workspace = true }
+anyhow = { workspace = true }
+sqlparser = { version = "0.52", features = ["visitor"] }

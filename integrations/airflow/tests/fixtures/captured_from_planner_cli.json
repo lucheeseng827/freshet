@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "name": "stg_orders",
+      "reason": "directly_changed",
+      "unit": "full_model"
+    },
+    {
+      "name": "mart_revenue",
+      "reason": {
+        "downstream": {
+          "because_of": "stg_orders",
+          "via_columns": [
+            "amount",
+            "order_id"
+          ]
+        }
+      },
+      "unit": "full_model"
+    }
+  ]
+}

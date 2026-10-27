@@ -1,0 +1,11 @@
+{
+  "models": [
+    { "name": "stg_orders", "reason": "directly_changed", "unit": "full_model" },
+    {
+      "name": "mart_revenue",
+      "reason": { "downstream": { "because_of": "stg_orders", "via_columns": ["amount", "qty"] } },
+      "unit": { "partitions": ["2026-09-01", "2026-09-02"] }
+    }
+  ],
+  "next_state": { "fingerprints": { "stg_orders": 12345, "mart_revenue": 67890 } }
+}

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshet-airflow"
+dynamic = ["version"]
+description = "Run a Freshet state plan as an Airflow DAG: one task per model, wired from the plan's own edges."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["airflow", "backfill", "freshet", "planner", "dag", "lineage", "incremental"]
+# None, on purpose. The plan half is standard library only, and the Airflow half
+# runs inside an Airflow deployment that already pinned Airflow and its providers
+# with a constraints file. Declaring apache-airflow here would invite pip to
+# re-resolve the scheduler's own install; the `airflow` extra is for a fresh
+# environment, not for a production one.
+dependencies = []
+
+[project.optional-dependencies]
+airflow = [
+  "apache-airflow>=2.6",
+  # SQLExecuteQueryOperator, for conn_id. Add your database's provider too
+  # (e.g. apache-airflow-providers-postgres).
+  "apache-airflow-providers-common-sql>=1.3",
+]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/lucheeseng827/freshet"
+
+[tool.setuptools]
+packages = ["freshet_airflow", "freshet_airflow.operators"]
+
+# Single source of truth for the version: `freshet_airflow.__version__`. setuptools
+# reads the literal statically at build time.
+[tool.setuptools.dynamic]
+version = { attr = "freshet_airflow.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets `pytest` run from this directory against the source tree, without an install.
+pythonpath = ["."]

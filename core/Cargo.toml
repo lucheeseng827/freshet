@@ -1,0 +1,39 @@
+# Freshet core: the planner brain (Apache-2.0).
+#
+# Its own workspace: the library any orchestrator or CLI can embed to answer
+# "given this SQL change, what is the minimal backfill?".
+#
+#   freshet-core   model graph + column-level lineage + minimal-plan logic
+#   freshet-sql    SQL -> depends_on + per-column upstream (via sqlparser)
+#   freshet-state  the incremental-state model + a local (file) backend
+#   freshet-api    the embeddable facade: the entrypoint orchestrators call
+#
+# Nothing here depends on the layer above it (the CLI, daemon and bindings); that
+# layer depends on these crates one way.
+[workspace]
+resolver = "2"
+members = [
+    "crates/freshet-core",
+    "crates/freshet-sql",
+    "crates/freshet-state",
+    "crates/freshet-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/lucheeseng827/freshet"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+freshet-core = { path = "crates/freshet-core", version = "0.1.0" }
+freshet-state = { path = "crates/freshet-state", version = "0.1.0" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

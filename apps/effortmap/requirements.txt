@@ -1,0 +1,31 @@
+# ONLY the `streamlit` renderer needs these.
+#
+# `render.py --to text | html | json | ndjson` is standard library and needs nothing
+# installed — that is the point of the renderer seam. Install this file when you want
+# the interactive app, and not otherwise:
+#
+#   python render.py --to text                    <- no install
+#   python render.py --to html --out map.html     <- no install
+#   pip install -r requirements.txt               <- only for the next line
+#   python render.py --to streamlit
+#
+# The floor on streamlit is a real constraint, not caution: `app.py` sizes every widget
+# with `width="stretch"`, and on a version that predates that parameter those calls raise
+# TypeError *while the page renders* — not at import, so nothing in CI would catch it.
+# The older spelling, `use_container_width=True`, is deprecated upstream and documented
+# as due for removal, so the floor is what moves rather than the call sites.
+#
+# On the provenance of the number, because a requirements floor is a claim and this one
+# was briefly wrong twice: it read `>=1.40`, which predates `width` entirely and would
+# have raised TypeError on render. It then read `>=1.50`, justified by per-widget version
+# numbers nothing here had checked. It now reads the version this app has actually been
+# run against, which is the only number this repository can stand behind.
+#
+# That is deliberately conservative — several releases below 1.63 probably work — but
+# "probably" is what the previous two floors were made of, and the cost of being wrong is
+# a TypeError in front of a user while the page renders, against a cost of one `pip`
+# upgrade for being over-strict. Lower it only after installing the version you lower it
+# to and loading the page.
+streamlit>=1.63
+altair>=5.4
+pandas>=2.0

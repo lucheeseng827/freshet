@@ -1,0 +1,21 @@
+[package]
+name = "freshet-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "C ABI for Freshet: JSON in, JSON out, Rust allocates and frees."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_ffi"
+# cdylib for dlopen/FFI hosts; staticlib for static linking; rlib so it also builds
+# as a normal crate in `cargo build`/tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+freshet-embed = { workspace = true }
+serde_json = { workspace = true } # only for correctly-escaped error strings at the boundary

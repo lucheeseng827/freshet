@@ -1,0 +1,24 @@
+[package]
+name = "freshet-dbt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reads a dbt project's artifacts and reports what Freshet would have pruned from its last run. Read-only."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_dbt"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-core = { workspace = true }        # Project / Model / plan_backfill — the brain, reused as-is
+freshet-sql = { workspace = true }         # analyze() + Catalog: column lineage from each model's SQL
+freshet-fingerprint = { workspace = true } # AstFingerprinter: the same change detector `freshet plan` uses
+# The same exact pin freshet-sql and freshet-fingerprint build against, so the AST this
+# crate walks for row-level references is the one lineage was derived from.
+sqlparser = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

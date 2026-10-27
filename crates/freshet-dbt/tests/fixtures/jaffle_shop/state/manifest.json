@@ -1,0 +1,769 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.9.4",
+    "generated_at": "2026-09-20T06:00:11.000000Z",
+    "invocation_id": "9a1b3c5d-7e9f-4a2b-8c4d-6e8f0a2b4c6d",
+    "env": {},
+    "project_name": "jaffle_shop",
+    "adapter_type": "postgres"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_orders": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "staging/stg_orders.sql",
+      "original_file_path": "models/staging/stg_orders.sql",
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "stg_orders"
+      ],
+      "alias": "stg_orders_v2",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "49c305fad1b69a06fc90a4cf597186b7493be15e37ef32441ed35954227e4340"
+      },
+      "config": {
+        "enabled": true,
+        "alias": "stg_orders_v2",
+        "schema": null,
+        "database": null,
+        "materialized": "view"
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "relation_name": "\"prod\".\"analytics\".\"stg_orders_v2\"",
+      "raw_code": "with source as (\n\n    select * from {{ source('shop', 'orders') }}\n\n),\n\nrenamed as (\n\n    select\n        id as order_id,\n        user_id as customer_id,\n        amount_cents / 100 as amount,\n        status,\n        created_at as ordered_at\n    from source\n\n)\n\nselect * from renamed",
+      "language": "sql",
+      "refs": [],
+      "sources": [
+        [
+          "shop",
+          "orders"
+        ]
+      ],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "source.jaffle_shop.shop.orders"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/staging/stg_orders.sql",
+      "compiled": true,
+      "compiled_code": "with source as (\n\n    select * from \"raw\".\"shop\".\"orders\"\n\n),\n\nrenamed as (\n\n    select\n        id as order_id,\n        user_id as customer_id,\n        amount_cents / 100 as amount,\n        status,\n        created_at as ordered_at\n    from source\n\n)\n\nselect * from renamed",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.stg_customers": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "stg_customers",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "staging/stg_customers.sql",
+      "original_file_path": "models/staging/stg_customers.sql",
+      "unique_id": "model.jaffle_shop.stg_customers",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "stg_customers"
+      ],
+      "alias": "stg_customers",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "efabe0b5f0548b5d355dfbe60df16ac6b8bc3a1161902148d8fe58051a3adf74"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "view"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"stg_customers\"",
+      "raw_code": "with source as (\n\n    select * from {{ source('shop', 'customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        first_name || ' ' || last_name as full_name,\n        region\n    from source\n\n)\n\nselect * from renamed",
+      "language": "sql",
+      "refs": [],
+      "sources": [
+        [
+          "shop",
+          "customers"
+        ]
+      ],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "source.jaffle_shop.shop.customers"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/staging/stg_customers.sql",
+      "compiled": true,
+      "compiled_code": "with source as (\n\n    select * from \"raw\".\"shop\".\"customers\"\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        first_name || ' ' || last_name as full_name,\n        region\n    from source\n\n)\n\nselect * from renamed",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.orders_enriched": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "orders_enriched",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/orders_enriched.sql",
+      "original_file_path": "models/marts/orders_enriched.sql",
+      "unique_id": "model.jaffle_shop.orders_enriched",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "orders_enriched"
+      ],
+      "alias": "orders_enriched",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "39e7038b1c9afeb26695889b5c73f59924e7a57bad641ecb8c9d13c91c352a45"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "table"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"orders_enriched\"",
+      "raw_code": "select\n    o.order_id,\n    o.ordered_at,\n    o.amount,\n    o.status,\n    c.full_name as customer_name,\n    c.region\nfrom {{ ref('stg_orders') }} o\njoin {{ ref('stg_customers') }} c on o.customer_id = c.customer_id",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "stg_orders",
+          "package": null,
+          "version": null
+        },
+        {
+          "name": "stg_customers",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.stg_orders",
+          "model.jaffle_shop.stg_customers"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/orders_enriched.sql",
+      "compiled": true,
+      "compiled_code": "select\n    o.order_id,\n    o.ordered_at,\n    o.amount,\n    o.status,\n    c.full_name as customer_name,\n    c.region\nfrom \"prod\".\"analytics\".\"stg_orders_v2\" o\njoin \"prod\".\"analytics\".\"stg_customers\" c on o.customer_id = c.customer_id",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.mart_revenue": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "mart_revenue",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/mart_revenue.sql",
+      "original_file_path": "models/marts/mart_revenue.sql",
+      "unique_id": "model.jaffle_shop.mart_revenue",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "mart_revenue"
+      ],
+      "alias": "mart_revenue",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0576c1d1ea25f0776f1c898431f3e9481a3344276f15c443c404bc0367abd2ac"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "table"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"mart_revenue\"",
+      "raw_code": "select\n    region,\n    sum(amount) as revenue\nfrom {{ ref('orders_enriched') }}\ngroup by region",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "orders_enriched",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.orders_enriched"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/mart_revenue.sql",
+      "compiled": true,
+      "compiled_code": "select\n    region,\n    sum(amount) as revenue\nfrom \"prod\".\"analytics\".\"orders_enriched\"\ngroup by region",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.mart_customers": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "mart_customers",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/mart_customers.sql",
+      "original_file_path": "models/marts/mart_customers.sql",
+      "unique_id": "model.jaffle_shop.mart_customers",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "mart_customers"
+      ],
+      "alias": "mart_customers",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "3d0a633b6b5678bcf6faafa7deeb8ff25109bcc006b1ad0ec8fff26e7058e2f6"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "table"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"mart_customers\"",
+      "raw_code": "select\n    customer_name,\n    region,\n    count(order_id) as order_count\nfrom {{ ref('orders_enriched') }}\ngroup by customer_name, region",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "orders_enriched",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.orders_enriched"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/mart_customers.sql",
+      "compiled": true,
+      "compiled_code": "select\n    customer_name,\n    region,\n    count(order_id) as order_count\nfrom \"prod\".\"analytics\".\"orders_enriched\"\ngroup by customer_name, region",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.mart_big_orders": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "mart_big_orders",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/mart_big_orders.sql",
+      "original_file_path": "models/marts/mart_big_orders.sql",
+      "unique_id": "model.jaffle_shop.mart_big_orders",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "mart_big_orders"
+      ],
+      "alias": "mart_big_orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "89b877884148bd9d63643f780dab502854eee66a06af84a2143df1ae2dbb549b"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "table"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"mart_big_orders\"",
+      "raw_code": "select\n    customer_name,\n    count(order_id) as big_orders\nfrom {{ ref('orders_enriched') }}\nwhere amount >= 100\ngroup by customer_name",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "orders_enriched",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.orders_enriched"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/mart_big_orders.sql",
+      "compiled": true,
+      "compiled_code": "select\n    customer_name,\n    count(order_id) as big_orders\nfrom \"prod\".\"analytics\".\"orders_enriched\"\nwhere amount >= 100\ngroup by customer_name",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.orders_daily": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "orders_daily",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/orders_daily.sql",
+      "original_file_path": "models/marts/orders_daily.sql",
+      "unique_id": "model.jaffle_shop.orders_daily",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "orders_daily"
+      ],
+      "alias": "orders_daily",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "d77264dbaa21de62bbee9c9e024c36423d074b19f665c3137276ff06566120f5"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "incremental"
+      },
+      "columns": {
+        "order_date": {
+          "name": "order_date",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "orders": {
+          "name": "orders",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "relation_name": "\"prod\".\"analytics\".\"orders_daily\"",
+      "raw_code": "{{ config(materialized='incremental', unique_key='order_date') }}\n\nselect\n    cast(ordered_at as date) as order_date,\n    count(*) as orders\nfrom {{ ref('stg_orders') }}\n{% if is_incremental() %}\nwhere ordered_at > (select max(order_date) from {{ this }})\n{% endif %}\ngroup by 1",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "stg_orders",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [
+          "macro.dbt.is_incremental"
+        ],
+        "nodes": [
+          "model.jaffle_shop.stg_orders"
+        ]
+      },
+      "version": null,
+      "latest_version": null
+    },
+    "model.jaffle_shop.weekly_orders": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "weekly_orders",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/weekly_orders.sql",
+      "original_file_path": "models/marts/weekly_orders.sql",
+      "unique_id": "model.jaffle_shop.weekly_orders",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "weekly_orders"
+      ],
+      "alias": "weekly_orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "5d87a7f17af5012574ea59147d9a3cb6cbdb13c21621392dd1ed18f5a4b6aec7"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "view"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"weekly_orders\"",
+      "raw_code": "{{ config(materialized='view') }}\n\nselect\n    date_trunc('week', order_date) as order_week,\n    sum(orders) as orders\nfrom {{ ref('orders_daily') }}\ngroup by 1",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "orders_daily",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.orders_daily"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/weekly_orders.sql",
+      "compiled": true,
+      "compiled_code": "\n\nselect\n    date_trunc('week', order_date) as order_week,\n    sum(orders) as orders\nfrom \"prod\".\"analytics\".\"orders_daily\"\ngroup by 1",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "model.jaffle_shop.legacy_orders": {
+      "database": "prod",
+      "schema": "analytics",
+      "name": "legacy_orders",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "marts/legacy_orders.sql",
+      "original_file_path": "models/marts/legacy_orders.sql",
+      "unique_id": "model.jaffle_shop.legacy_orders",
+      "fqn": [
+        "jaffle_shop",
+        "marts",
+        "legacy_orders"
+      ],
+      "alias": "legacy_orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "2277719454e8c55024ebdd7102d7985f3ba3839c58b9709f3f2b371154913097"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "materialized": "table"
+      },
+      "columns": {},
+      "relation_name": "\"prod\".\"analytics\".\"legacy_orders\"",
+      "raw_code": "select order_id, amount from {{ ref('stg_orders') }}",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "stg_orders",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.stg_orders"
+        ]
+      },
+      "version": null,
+      "latest_version": null,
+      "compiled_path": "target/compiled/jaffle_shop/models/marts/legacy_orders.sql",
+      "compiled": true,
+      "compiled_code": "select order_id, amount from \"prod\".\"analytics\".\"stg_orders_v2\"",
+      "extra_ctes_injected": true,
+      "extra_ctes": []
+    },
+    "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64": {
+      "database": "prod",
+      "schema": "analytics_dbt_test__audit",
+      "name": "not_null_stg_orders_order_id",
+      "resource_type": "test",
+      "package_name": "jaffle_shop",
+      "path": "not_null_stg_orders_order_id.sql",
+      "original_file_path": "models/staging/schema.yml",
+      "unique_id": "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "not_null_stg_orders_order_id"
+      ],
+      "alias": "not_null_stg_orders_order_id",
+      "checksum": {
+        "name": "none",
+        "checksum": ""
+      },
+      "config": {
+        "enabled": true,
+        "materialized": "test",
+        "severity": "ERROR"
+      },
+      "raw_code": "{{ test_not_null(**_dbt_generic_test_kwargs) }}",
+      "language": "sql",
+      "depends_on": {
+        "macros": [
+          "macro.dbt.test_not_null"
+        ],
+        "nodes": [
+          "model.jaffle_shop.stg_orders"
+        ]
+      },
+      "column_name": "order_id",
+      "attached_node": "model.jaffle_shop.stg_orders"
+    }
+  },
+  "sources": {
+    "source.jaffle_shop.shop.orders": {
+      "database": "raw",
+      "schema": "shop",
+      "name": "orders",
+      "resource_type": "source",
+      "package_name": "jaffle_shop",
+      "path": "models/sources.yml",
+      "original_file_path": "models/sources.yml",
+      "unique_id": "source.jaffle_shop.shop.orders",
+      "fqn": [
+        "jaffle_shop",
+        "shop",
+        "orders"
+      ],
+      "source_name": "shop",
+      "source_description": "",
+      "loader": "",
+      "identifier": "orders",
+      "columns": {
+        "id": {
+          "name": "id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "user_id": {
+          "name": "user_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "amount_cents": {
+          "name": "amount_cents",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "status": {
+          "name": "status",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "created_at": {
+          "name": "created_at",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "relation_name": "\"raw\".\"shop\".\"orders\"",
+      "unrendered_database": "raw",
+      "unrendered_schema": "shop"
+    },
+    "source.jaffle_shop.shop.customers": {
+      "database": "raw",
+      "schema": "shop",
+      "name": "customers",
+      "resource_type": "source",
+      "package_name": "jaffle_shop",
+      "path": "models/sources.yml",
+      "original_file_path": "models/sources.yml",
+      "unique_id": "source.jaffle_shop.shop.customers",
+      "fqn": [
+        "jaffle_shop",
+        "shop",
+        "customers"
+      ],
+      "source_name": "shop",
+      "source_description": "",
+      "loader": "",
+      "identifier": "customers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "first_name": {
+          "name": "first_name",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "last_name": {
+          "name": "last_name",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "region": {
+          "name": "region",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "relation_name": "\"raw\".\"shop\".\"customers\"",
+      "unrendered_database": "raw",
+      "unrendered_schema": "shop"
+    }
+  },
+  "macros": {
+    "macro.dbt.is_incremental": {
+      "name": "is_incremental",
+      "resource_type": "macro",
+      "package_name": "dbt",
+      "path": "macros/materializations/models/incremental/is_incremental.sql",
+      "original_file_path": "macros/materializations/models/incremental/is_incremental.sql",
+      "unique_id": "macro.dbt.is_incremental",
+      "macro_sql": "{% macro is_incremental() %}\n    {{ return(adapter.dispatch('is_incremental', 'dbt')()) }}\n{% endmacro %}",
+      "depends_on": {
+        "macros": []
+      }
+    }
+  },
+  "docs": {},
+  "exposures": {},
+  "metrics": {},
+  "groups": {},
+  "selectors": {},
+  "disabled": {},
+  "parent_map": {
+    "model.jaffle_shop.stg_orders": [
+      "source.jaffle_shop.shop.orders"
+    ],
+    "model.jaffle_shop.stg_customers": [
+      "source.jaffle_shop.shop.customers"
+    ],
+    "model.jaffle_shop.orders_enriched": [
+      "model.jaffle_shop.stg_orders",
+      "model.jaffle_shop.stg_customers"
+    ],
+    "model.jaffle_shop.mart_revenue": [
+      "model.jaffle_shop.orders_enriched"
+    ],
+    "model.jaffle_shop.mart_customers": [
+      "model.jaffle_shop.orders_enriched"
+    ],
+    "model.jaffle_shop.mart_big_orders": [
+      "model.jaffle_shop.orders_enriched"
+    ],
+    "model.jaffle_shop.orders_daily": [
+      "model.jaffle_shop.stg_orders"
+    ],
+    "model.jaffle_shop.weekly_orders": [
+      "model.jaffle_shop.orders_daily"
+    ],
+    "model.jaffle_shop.legacy_orders": [
+      "model.jaffle_shop.stg_orders"
+    ],
+    "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64": [
+      "model.jaffle_shop.stg_orders"
+    ],
+    "source.jaffle_shop.shop.orders": [],
+    "source.jaffle_shop.shop.customers": []
+  },
+  "child_map": {
+    "model.jaffle_shop.stg_orders": [
+      "model.jaffle_shop.legacy_orders",
+      "model.jaffle_shop.orders_daily",
+      "model.jaffle_shop.orders_enriched",
+      "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64"
+    ],
+    "model.jaffle_shop.stg_customers": [
+      "model.jaffle_shop.orders_enriched"
+    ],
+    "model.jaffle_shop.orders_enriched": [
+      "model.jaffle_shop.mart_big_orders",
+      "model.jaffle_shop.mart_customers",
+      "model.jaffle_shop.mart_revenue"
+    ],
+    "model.jaffle_shop.mart_revenue": [],
+    "model.jaffle_shop.mart_customers": [],
+    "model.jaffle_shop.mart_big_orders": [],
+    "model.jaffle_shop.orders_daily": [
+      "model.jaffle_shop.weekly_orders"
+    ],
+    "model.jaffle_shop.weekly_orders": [],
+    "model.jaffle_shop.legacy_orders": [],
+    "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64": [],
+    "source.jaffle_shop.shop.orders": [
+      "model.jaffle_shop.stg_orders"
+    ],
+    "source.jaffle_shop.shop.customers": [
+      "model.jaffle_shop.stg_customers"
+    ]
+  },
+  "group_map": {},
+  "saved_queries": {},
+  "semantic_models": {},
+  "unit_tests": {}
+}

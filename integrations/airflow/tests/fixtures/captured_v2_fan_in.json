@@ -1,0 +1,12 @@
+{
+  "models": [
+    { "name": "dim_customer", "reason": "directly_changed", "unit": "full_model", "depends_on": [] },
+    { "name": "stg_orders",   "reason": "directly_changed", "unit": "full_model", "depends_on": [] },
+    {
+      "name": "mart_revenue",
+      "reason": { "downstream": { "because_of": "dim_customer", "via_columns": ["region"] } },
+      "unit": "full_model",
+      "depends_on": ["dim_customer", "stg_orders"]
+    }
+  ]
+}

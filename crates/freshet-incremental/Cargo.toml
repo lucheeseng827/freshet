@@ -1,0 +1,22 @@
+[package]
+name = "freshet-incremental"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Partition scoping for Freshet: ordered partition domains, lookback windows, non-aligned grains, watermarks and replace strategies."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_incremental"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-core = { workspace = true }
+freshet-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Calendar math (days-from-civil) is hand-rolled in-crate — NO chrono/time dep — so
+# the default build graph stays serde-only. Hour/Week/Month grains are scaffolded as
+# "unsupported -> escalate to Full" (over-rebuild safe) until M1 lands them.

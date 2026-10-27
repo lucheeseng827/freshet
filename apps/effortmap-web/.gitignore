@@ -1,0 +1,8 @@
+# The WebAssembly artifact and its generated glue. Built by scripts/build.sh, never
+# committed: a checked-in binary drifts from the crates it was built from, and a stale
+# one is indistinguishable from a fresh one by looking. CI builds it and the deploy
+# uploads what CI built.
+assets/freshet_wasm.js
+assets/freshet_wasm.d.ts
+assets/freshet_wasm_bg.wasm
+assets/freshet_wasm_bg.wasm.d.ts

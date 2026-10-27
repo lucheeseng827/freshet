@@ -1,0 +1,26 @@
+# The wheel for `freshet_planner`. One stable-ABI (abi3) wheel covers CPython 3.8+.
+#
+#   pip install maturin
+#   maturin build --release            # -> target/wheels/freshet_planner-*-abi3-*.whl
+#   maturin develop                    # into the active virtualenv, for tests
+#
+# The `extension-module` feature is what links pyo3; a bare `cargo build` of the
+# workspace never selects it, so it never needs Python.
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "freshet-planner"
+description = "The Freshet backfill planner as a Python module: the minimal, column-pruned set of models (and partitions) a change must rebuild."
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "freshet_planner"

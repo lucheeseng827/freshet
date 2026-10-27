@@ -1,0 +1,10 @@
+{
+  "include_cost": true,
+  "include_queue": true,
+  "sources": { "raw_orders": ["order_id", "customer_id", "amount", "order_day"] },
+  "models": [
+    { "name": "stg_orders", "sql": "select order_id, customer_id, amount, order_day from raw_orders", "materialization": "incremental" },
+    { "name": "customer_ltv", "sql": "select customer_id, amount from stg_orders" },
+    { "name": "daily_revenue", "sql": "select order_day, amount from stg_orders", "materialization": "incremental" }
+  ]
+}

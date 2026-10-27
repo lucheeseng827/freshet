@@ -1,0 +1,60 @@
+[package]
+name = "freshet-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Freshet as a long-running daemon: a warm project with incremental reparse and a revision-stamped plan-to-commit handoff."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_serve"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Transports — all OFF by default so the daemon CORE compiles serde-only.
+watch = ["dep:notify"]
+# `http` is the shipped transport (M4): an axum router over the same
+# `ProjectCache::handle_json` the in-process lane calls, so the two can never drift.
+http = ["dep:tokio", "dep:axum", "dep:clap"]
+
+# The daemon binary. Needs the transport, a signal handler for graceful shutdown,
+# and argument parsing — none of which the library lane should pull in.
+[[bin]]
+name = "freshet-serve"
+path = "src/main.rs"
+required-features = ["http"]
+
+[dependencies]
+freshet-core = { workspace = true }
+freshet-sql = { workspace = true }
+freshet-state = { workspace = true }
+freshet-api = { workspace = true }
+freshet-embed = { workspace = true }
+freshet-fingerprint = { workspace = true }
+freshet-incremental = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# Incremental reparse has to know every table a model's SQL names, including the ones
+# freshet-sql leaves out of `depends_on` (a top-level CTE shadowing a model name), and
+# freshet-sql exposes no parser. This is the workspace's pinned copy, the same one
+# freshet-sql parses with, so it adds no crate to the graph; it must never drift from
+# freshet-sql's version, or the two could disagree about what a model reads.
+sqlparser = { workspace = true }
+# Off-by-default transport deps (M4). The lean lane never pulls these.
+notify = { version = "6", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"], optional = true }
+# 0.8 matches dagpane-serve, the other axum server in this repository. One axum
+# major across the tree keeps a future shared middleware layer possible.
+axum = { version = "0.8", optional = true }
+clap = { workspace = true, optional = true }
+
+# Tests drive the real transport over a real socket. The client is hand-rolled on a
+# TcpStream in `tests/http.rs` (about twenty lines) rather than pulled in as an HTTP
+# client crate: the thing under test is a request/response contract, and asserting on
+# actual bytes off the wire is both the stronger assertion and the smaller dependency.
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

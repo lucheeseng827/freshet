@@ -1,0 +1,87 @@
+# Freshet: the CLI, daemon, bindings and incremental engine over the planner core
+# (Apache-2.0).
+#
+#   freshet-incremental  partition domain + lookback windows + non-aligned grains +
+#                        persisted watermarks
+#   freshet-fingerprint  AST-canonical fingerprinting (cosmetic edits never rebuild)
+#   freshet-render       replace ops -> dialect SQL text (never executed here)
+#   freshet-embed        one pure-Rust JSON funnel + the frozen wire contract every
+#                        binding marshals through
+#   freshet-dbt          reads a dbt project's artifacts and reports what Freshet
+#                        would have pruned from its last run (`freshet explain`)
+#   freshet-cli          the `freshet` binary
+#   freshet-serve        long-running daemon with incremental reparse
+#   freshet-ffi          C-ABI cdylib (JSON in/out, Rust-allocates/Rust-frees)
+#   freshet-wasm         browser/Node "what will this PR rebuild?" (wasm-bindgen)
+#   freshet-py           the `freshet-planner` Python wheel (pyo3 + maturin, abi3)
+#   freshet-bench        synthetic generators + criterion suite + tool comparison
+#
+# The planner core (freshet-core/sql/state/api) is a separate workspace these crates
+# path-depend on one way; it never depends on anything here.
+[workspace]
+exclude = ["core"]
+resolver = "2"
+members = [
+    "crates/freshet-incremental",
+    "crates/freshet-fingerprint",
+    "crates/freshet-render",
+    "crates/freshet-embed",
+    "crates/freshet-ffi",
+    "crates/freshet-cli",
+    "crates/freshet-serve",
+    "crates/freshet-dbt",
+    "crates/freshet-wasm",
+    "crates/freshet-py",
+    "crates/freshet-bench",
+]
+# default-members deliberately EXCLUDES the two bindings that need an exotic
+# toolchain (wasm32 target / libpython). A bare `cargo build` / `cargo test` builds
+# only these and stays green on a stock host. freshet-wasm/freshet-py are still
+# `members` (so `cargo build --workspace` compiles them as pure re-exports with
+# their glue feature-gated off), but are built for real via wasm-pack / maturin.
+default-members = [
+    "crates/freshet-incremental",
+    "crates/freshet-fingerprint",
+    "crates/freshet-render",
+    "crates/freshet-embed",
+    "crates/freshet-ffi",
+    "crates/freshet-cli",
+    "crates/freshet-serve",
+    "crates/freshet-dbt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/lucheeseng827/freshet"
+
+[workspace.dependencies]
+# --- The planner core, one way. Declared once, here; crates reference these as
+#     `{ workspace = true }` and never hardcode a relative path. ---
+freshet-core  = { path = "core/crates/freshet-core", version = "0.1.0" }
+freshet-sql   = { path = "core/crates/freshet-sql", version = "0.1.0" }
+freshet-state = { path = "core/crates/freshet-state", version = "0.1.0" }
+freshet-api   = { path = "core/crates/freshet-api", version = "0.1.0" }
+
+# --- crates in this workspace ---
+freshet-incremental = { path = "crates/freshet-incremental", version = "0.1.0" }
+freshet-fingerprint = { path = "crates/freshet-fingerprint", version = "0.1.0" }
+freshet-render      = { path = "crates/freshet-render", version = "0.1.0" }
+freshet-embed       = { path = "crates/freshet-embed", version = "0.1.0" }
+freshet-dbt         = { path = "crates/freshet-dbt", version = "0.1.0" }
+
+# --- shared third-party. sqlparser is pinned BYTE-IDENTICAL to the core's
+#     freshet-sql (0.52 + "visitor") so the canonical AST Display never drifts a
+#     fingerprint underneath us (a 0.52 -> 0.53 bump is an explicit scheme bump). ---
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlparser = { version = "=0.52.0", features = ["visitor"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

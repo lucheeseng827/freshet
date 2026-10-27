@@ -1,0 +1,23 @@
+[package]
+name = "freshet-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Renders Freshet's replace operations as SQL text for postgres, snowflake, bigquery, databricks and redshift. Never connects to anything."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_render"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-core = { workspace = true }
+freshet-incremental = { workspace = true }
+
+# The syntax check in tests/syntax.rs parses every rendered statement with the
+# matching sqlparser dialect. Dev-only and pinned to the workspace's exact version,
+# so the renderer itself stays dependency-free and the check cannot drift.
+[dev-dependencies]
+sqlparser = { workspace = true }

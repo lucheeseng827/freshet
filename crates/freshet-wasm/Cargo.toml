@@ -1,0 +1,32 @@
+[package]
+name = "freshet-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Freshet for the browser and Node via wasm-bindgen: what will this PR rebuild, with no server."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_wasm"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:js-sys"]
+
+[dependencies]
+freshet-embed = { workspace = true }
+# All optional + behind `wasm` so they NEVER enter the default build graph.
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+# The golden test compares parsed JSON rather than text: the fixture is pretty-printed
+# for human review while the binding emits compact output, and neither formatting nor
+# key order is part of the contract.
+[dev-dependencies]
+serde_json = { workspace = true }

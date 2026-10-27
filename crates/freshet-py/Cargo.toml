@@ -1,0 +1,32 @@
+[package]
+name = "freshet-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Python bindings for Freshet (pyo3 + maturin, abi3), published to PyPI as freshet-planner."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_planner"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+# `extension-module` turns on pyo3's own extension-module mode too (so the wheel
+# doesn't link libpython directly). OFF by default -> default build needs no Python.
+extension-module = ["dep:pyo3", "dep:pythonize", "pyo3/extension-module"]
+
+[dependencies]
+freshet-embed = { workspace = true }
+serde_json = { workspace = true } # reads a response's `error` to raise PlannerError
+pyo3 = { version = "0.22", features = ["abi3-py38"], optional = true }
+pythonize = { version = "0.22", optional = true }
+
+[lints.rust]
+# pyo3 0.22's `create_exception!` expands a `cfg(feature = "gil-refs")` check inside
+# the calling crate. Declare the (never-enabled) value so it is not a warning.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gil-refs"))'] }

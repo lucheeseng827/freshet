@@ -1,0 +1,18 @@
+[package]
+name = "freshet-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embeddable Freshet facade: load a project and prior state, get the minimal backfill plan, commit state after the run succeeds."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_api"
+path = "src/lib.rs"
+
+[dependencies]
+freshet-core = { workspace = true }
+freshet-state = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshet-sdk"
+dynamic = ["version"]
+description = "Ask the backfill planner what a SQL change rebuilds, what it will cost in compute units, and the queue to run it."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+keywords = ["backfill", "planner", "dbt", "sqlmesh", "lineage", "incremental", "dag"]
+# Standard library only, on purpose: this is the surface a data team drops into an
+# existing environment, and a client that pulls in a dependency tree is a client that
+# has to be reconciled with whatever the orchestrator already pinned.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/lucheeseng827/freshet"
+
+[tool.setuptools]
+py-modules = ["freshet_sdk"]
+
+# Single source of truth for the version: `freshet_sdk.__version__`. Bump it there only;
+# setuptools reads the literal statically at build time.
+[tool.setuptools.dynamic]
+version = { attr = "freshet_sdk.__version__" }

@@ -1,0 +1,148 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json",
+    "dbt_version": "1.9.4",
+    "generated_at": "2026-09-21T09:14:09.000000Z",
+    "invocation_id": "4f7c2b1e-0d3a-4c55-9a51-0c1d2e3f4a5b",
+    "env": {}
+  },
+  "results": [
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"stg_orders_v2\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.stg_customers",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"stg_customers\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.orders_enriched",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"orders_enriched\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.mart_revenue",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"mart_revenue\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.mart_customers",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"mart_customers\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.mart_big_orders",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"mart_big_orders\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.orders_daily",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"orders_daily\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.weekly_orders",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"weekly_orders\""
+    },
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": "SELECT 3",
+      "failures": null,
+      "unique_id": "model.jaffle_shop.customer_regions",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": "\"dev\".\"dbt_alice\".\"customer_regions\""
+    },
+    {
+      "status": "pass",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0.05,
+      "adapter_response": {},
+      "message": null,
+      "failures": 0,
+      "unique_id": "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64",
+      "compiled": true,
+      "compiled_code": null,
+      "relation_name": null
+    }
+  ],
+  "elapsed_time": 1.93,
+  "args": {
+    "which": "build",
+    "target": "dev",
+    "select": [],
+    "exclude": []
+  }
+}

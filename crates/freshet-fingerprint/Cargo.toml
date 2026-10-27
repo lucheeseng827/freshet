@@ -1,0 +1,28 @@
+[package]
+name = "freshet-fingerprint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AST-canonical SQL fingerprints for Freshet: cosmetic edits never trigger a rebuild, semantic edits always do."
+keywords = ["sql", "lineage", "backfill", "dbt", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_fingerprint"
+path = "src/lib.rs"
+
+[features]
+# `ast` is ON by default: sqlparser is already in the Freshet build graph (via
+# freshet-embed -> freshet-sql), so enabling it here adds no new external dep. An
+# ultra-light embedder can `--no-default-features` to drop sqlparser and run the
+# Text scheme only (identical behaviour to freshet-state's normalize_sql).
+default = ["ast"]
+ast = ["dep:sqlparser"]
+
+[dependencies]
+freshet-core = { workspace = true }
+freshet-state = { workspace = true } # reuse the `Fingerprint` (= u64) alias; never redefine it
+# Pinned EXACTLY to the planner core's freshet-sql (0.52 + "visitor") via workspace dep.
+# Optional + behind `ast` so the Text-only fallback build needs no SQL engine.
+sqlparser = { workspace = true, optional = true }

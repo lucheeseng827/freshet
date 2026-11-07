@@ -1,0 +1,322 @@
+name: Release
+
+# Builds and publishes a Freshet release from THIS repo's source:
+#
+#   binaries  freshet + freshet-serve for Linux (static musl, x86_64 + aarch64),
+#             macOS (arm64 + x86_64) and Windows (x86_64), attached to the release
+#   image     mancube/freshet, linux/amd64 + linux/arm64, built natively per arch
+#   crates    the eleven published crates, core first, in dependency order
+#   pypi      freshet-planner (abi3 wheels), freshet-sdk, freshet-airflow
+#
+# Fired by the `vX.Y.Z` tag the monorepo's sync creates with a release. A manual run
+# builds everything for the version you give and publishes nothing.
+#
+# Secrets live on the `cicd` environment: CRATESIO_TOKEN, PYPI_TOKEN,
+# DOCKER_USERNAME, DOCKER_PASSWORD. Every publish step is idempotent (versions that
+# already exist are skipped), so a failed run can simply be re-run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the v). Dry run: nothing is published."
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: mancube/freshet
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve the version and check every package agrees
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then V="${GITHUB_REF_NAME#v}"; PUBLISH=true; else V="$INPUT"; PUBLISH=false; fi
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::invalid version '$V'"; exit 1; }
+          ws() { grep -m1 -E '^version[[:space:]]*=' "$1" | sed -E 's/.*"([^"]+)".*/\1/'; }
+          py() { grep -m1 -E '^__version__' "$1" | sed -E 's/.*"([^"]+)".*/\1/'; }
+          bad=0
+          for pair in "Cargo.toml=$(ws Cargo.toml)" "core/Cargo.toml=$(ws core/Cargo.toml)" \
+                      "sdks/python/freshet_sdk.py=$(py sdks/python/freshet_sdk.py)" \
+                      "integrations/airflow/freshet_airflow/__init__.py=$(py integrations/airflow/freshet_airflow/__init__.py)"; do
+            [ "${pair#*=}" = "$V" ] || { echo "::error::${pair%%=*} says ${pair#*=}, release is $V"; bad=1; }
+          done
+          [ "$bad" = 0 ]
+          case "$V" in *-*) PRE=true ;; *) PRE=false ;; esac
+          { echo "version=$V"; echo "publish=$PUBLISH"; echo "prerelease=$PRE"; } >> "$GITHUB_OUTPUT"
+          echo "Freshet $V, publish=$PUBLISH, prerelease=$PRE" >> "$GITHUB_STEP_SUMMARY"
+
+  binaries:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-14,         target: aarch64-apple-darwin }
+          - { os: macos-14,         target: x86_64-apple-darwin }
+          - { os: windows-2022,     target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          # musl-gcc: ring (rustls' crypto) compiles C
+          if [[ "${{ matrix.target }}" == *-linux-musl ]]; then sudo apt-get update -q && sudo apt-get install -y -q musl-tools; fi
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} -p freshet-cli -p freshet-serve --features freshet-serve/http
+      - name: Package
+        shell: bash
+        env:
+          V: ${{ needs.meta.outputs.version }}
+          T: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="freshet-v${V}-${T}"
+          mkdir -p "dist/$name"
+          ext=""; [[ "$T" == *windows* ]] && ext=".exe"
+          cp "target/$T/release/freshet$ext" "target/$T/release/freshet-serve$ext" LICENSE NOTICE README.md "dist/$name/"
+          cd dist
+          if [[ "$T" == *windows* ]]; then 7z a -bd "$name.zip" "$name" >/dev/null; f="$name.zip"
+          else tar czf "$name.tar.gz" "$name"; f="$name.tar.gz"; fi
+          if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          rm -rf "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+
+  attach:
+    needs: [meta, binaries]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: dist
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.meta.outputs.version }}
+          PRE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # The sync normally creates the release; create it if the tag was pushed by hand.
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            flag=""; [ "$PRE" = true ] && flag="--prerelease"
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --title "Freshet $TAG" --generate-notes $flag
+          fi
+          gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY" --clobber
+
+  image:
+    needs: meta
+    environment: cicd
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     platform: linux/amd64, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, platform: linux/arm64, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: needs.meta.outputs.publish == 'true'
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Build (push by digest on a release)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: ${{ needs.meta.outputs.publish == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
+      - name: Smoke test the image
+        if: needs.meta.outputs.publish != 'true'
+        run: |
+          docker buildx build --platform ${{ matrix.platform }} --load -t freshet:smoke .
+          docker run --rm freshet:smoke --version
+      - name: Export digest
+        if: needs.meta.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.publish == 'true'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+
+  image-merge:
+    needs: [meta, image]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: cicd
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: One multi-arch tag from the per-arch digests
+        env:
+          V: ${{ needs.meta.outputs.version }}
+          PRE: ${{ needs.meta.outputs.prerelease }}
+        working-directory: digests
+        run: |
+          set -euo pipefail
+          tags=(-t "$IMAGE:$V")
+          [ "$PRE" = true ] || tags+=(-t "$IMAGE:latest")
+          docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "$IMAGE:$V"
+          echo "Pushed $IMAGE:$V (amd64, arm64)" >> "$GITHUB_STEP_SUMMARY"
+
+  crates:
+    # After the binaries: a crate is never published from a tree that failed to build.
+    needs: [meta, binaries]
+    runs-on: ubuntu-24.04
+    environment: cicd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup default stable
+      - name: Publish in dependency order (core first; existing versions skipped)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+          V: ${{ needs.meta.outputs.version }}
+          PUBLISH: ${{ needs.meta.outputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" != true ]; then
+            # Only the core can be verified before anything is on crates.io: the root
+            # crates resolve the core from the registry once it is published.
+            (cd core && cargo publish --workspace --dry-run --locked)
+            echo "Dry run: core verified, nothing published." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          publish() { # dir crate
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A "freshet-release (github.com/$GITHUB_REPOSITORY)" \
+              "https://crates.io/api/v1/crates/$2/$V")
+            if [ "$code" = 200 ]; then echo "$2 $V already on crates.io, skipping"; return; fi
+            (cd "$1" && cargo publish --locked -p "$2")   # waits until the index has it
+            echo "Published $2 $V" >> "$GITHUB_STEP_SUMMARY"
+          }
+          for c in freshet-core freshet-sql freshet-state freshet-api; do publish core "$c"; done
+          for c in freshet-fingerprint freshet-incremental freshet-render freshet-embed \
+                   freshet-dbt freshet-cli freshet-serve; do publish . "$c"; done
+
+  wheels:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     target: x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64 }
+          - { os: macos-14,         target: universal2-apple-darwin }
+          - { os: windows-2022,     target: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --locked --out dist -m crates/freshet-py/Cargo.toml
+      - name: Import the wheel and run its tests
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links dist freshet-planner
+          cd crates/freshet-py/tests && python -m unittest -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  pure-python:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build freshet-sdk and freshet-airflow
+        run: |
+          python -m pip install -q build
+          python -m build sdks/python --outdir dist
+          python -m build integrations/airflow --outdir dist
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-pure
+          path: dist/*
+
+  pypi:
+    needs: [meta, wheels, pure-python]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: cicd
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: py-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: true

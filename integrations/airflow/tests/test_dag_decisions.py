@@ -21,7 +21,8 @@ from freshet_airflow import (
     plan_operators,
 )
 
-FIXTURES = pathlib.Path(__file__).with_name("fixtures")
+# The contract fixtures belong to freshet-plan, the reader this package builds on.
+FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "plan" / "tests" / "fixtures"
 
 
 def fixture(name):

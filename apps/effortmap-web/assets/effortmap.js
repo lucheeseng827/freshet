@@ -15,6 +15,8 @@
  * upstream measures time.
  */
 
+import { stringifyExact } from "./json.js";
+
 /** The planner stores cost as an integer in thousandths of a compute unit, so sums
  *  and comparisons stay exact and a `view` (50 mCU) is not rounded to zero. */
 export const MILLICU_PER_CU = 1000;
@@ -204,11 +206,12 @@ export function heaviest(plan, n = 5) {
  *  NDJSON rather than a JSON array because this is what gets piped into a runner: a
  *  consumer reads it a line at a time without holding the whole plan in memory, and
  *  appending is concatenation. Order is `seq` order, which is dependency-safe to drain
- *  serially. Keys are sorted so two exports of the same plan diff cleanly. */
+ *  serially. Keys are sorted so two exports of the same plan diff cleanly. Written by
+ *  `stringifyExact`, so a u64 a row ever carries is written as its digits. */
 export function queueNdjson(plan) {
   return queueRows(plan)
     .map((row) =>
-      JSON.stringify(
+      stringifyExact(
         Object.fromEntries(Object.keys(row).sort().map((k) => [k, row[k]])),
       ),
     )

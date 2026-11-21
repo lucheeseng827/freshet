@@ -38,14 +38,17 @@ assets/
   app.js              wiring: files in, plan out, rows on the page — the DOM only
   effortmap.js        pure shaping; no DOM, no wasm, no fetch. Tested under node.
   planner.js          the seam to the WebAssembly module, and the state rules below
+  json.js             JSON.parse / JSON.stringify that never round an integer
   charts.js           SVG bar charts, no library
   styles.css          the whole design system, light and dark
   favicon.svg
 scripts/build.sh      cargo -> wasm-bindgen -> (wasm-opt) -> assets/
 test/                 node --test, no dependencies
-  effortmap.test.mjs  27 tests, a port of the Streamlit app's Python suite plus the
+  effortmap.test.mjs  28 tests, a port of the Streamlit app's Python suite plus the
                       HTML-escaping rules the table renderer depends on
-  wasm.test.mjs       12 tests over the real artifact, including the golden
+  json.test.mjs       8 tests: json.js is the built-ins exactly, until an integer
+                      passes 2^53
+  wasm.test.mjs       14 tests over the real artifact, including the golden
   golden/             the request/response fixture both bindings are pinned to
 ```
 
@@ -77,6 +80,16 @@ JSON; dagron has no business interpreting fingerprints"* — except that in Java
 
 This was found by the cross-binding golden test on its first run, not by reasoning.
 
+Keeping state as text protects the one field known to be a u64. It does not protect the
+next one: any u64 or i64 added to the wire would reach `JSON.parse` and be rounded with
+no test watching. So nothing in the page calls `JSON.parse` on what the planner wrote.
+`parseExact` (`json.js`) is `JSON.parse` except that an integer past 2^53 arrives as
+an exact `BigInt`, and `stringifyExact` writes one back as its digits. Arithmetic on a
+`BigInt` mixed with a number throws, so a new u64 is either exact or loud, never quietly
+wrong. Parsed and written back, every response the tests produce comes out byte for
+byte. The cost is about 9 ms against `JSON.parse`'s 4 ms on a 2,001-model plan of
+494 KB, which takes the planner 169 ms to produce.
+
 ## The cross-binding golden test
 
 `freshet-embed`'s docstring promises every binding "answers identically (a cross-binding
@@ -94,10 +107,12 @@ in the same commit.
 
 ## What this build does *not* do
 
-- **Directory access is uneven.** `showDirectoryPicker()` keeps a handle and can re-read
-  a folder, but is Chromium-only today. Elsewhere the page falls back to a
-  `webkitdirectory` input, which works but must be re-picked each session. This is the
-  real regression against `freshet-serve --project ./models`.
+- **Directory access is uneven.** `showDirectoryPicker()` keeps a handle, so in
+  Chromium browsers *Re-read the folder* reads the same folder again after an edit and
+  plans it. It is Chromium-only. Elsewhere the page falls back to a `webkitdirectory`
+  input, which reads a folder once per pick, and the page says so beside the button.
+  Neither keeps the folder across a reload. Against `freshet-serve --project ./models
+  --watch`, which replans as files change, this is the real regression.
 - **State is per-browser.** `localStorage` is not shared, so two engineers get two
   answers. Export `state.json` and commit it to have one — a snapshot is roughly 40
   bytes per model, so a thousand-model project is ~40 KB, small enough to review in a

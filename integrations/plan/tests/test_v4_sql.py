@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from freshet_airflow import ContractViolation, PlannerFailed, compile_plan, parse_plan
+from freshet_plan import ContractViolation, PlannerFailed, compile_plan, parse_plan
 
 FIXTURES = pathlib.Path(__file__).with_name("fixtures")
 

@@ -1,0 +1,32 @@
+[package]
+name = "freshet-state-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hosted state for Freshet that a team runs itself: versioned snapshots, compare-and-swap commits and a commit history, over HTTP."
+keywords = ["sql", "lineage", "backfill", "state", "incremental"]
+categories = ["database", "development-tools"]
+
+[lib]
+name = "freshet_state_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "freshet-state-server"
+path = "src/main.rs"
+
+[dependencies]
+# The snapshot type itself, so what is stored is exactly what a state file holds.
+freshet-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+# The same axum and tokio freshet-serve uses, so the workspace carries one of each.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
+axum = { version = "0.8" }
+
+# The client freshet-cli speaks hosted state with, so these tests send what it sends.
+[dev-dependencies]
+ureq = { version = "3" }

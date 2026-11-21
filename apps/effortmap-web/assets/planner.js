@@ -6,7 +6,7 @@
  * because the planner *parses* SQL for lineage and never executes it, so no query
  * engine is shipped.
  *
- * ## Why state is handled as text, and never as an object
+ * ## Why state is handled as text, and the response is parsed exactly
  *
  * `StateSnapshot.fingerprints` maps a model name to a **u64**. JavaScript numbers are
  * IEEE-754 doubles with 53 bits of integer precision, and a fingerprint routinely
@@ -22,18 +22,22 @@
  * which looks like conservatism rather than like corruption, and would never be
  * noticed.
  *
- * So the state never becomes a JS number. It is extracted from the response as raw
- * text by [`rawField`] and spliced back into the next request as raw text by
- * [`withRawField`]. This is the same instinct `dagron-state`'s wire.rs records — "the
- * snapshot is carried opaquely as raw JSON; dagron has no business interpreting
- * fingerprints" — except that in JavaScript "opaque" has to mean *text*, because
- * parsing is itself the lossy step.
+ * Two defences, one per direction:
  *
- * The rest of the response is parsed normally: cost is milliCU in the low thousands
- * and every other field is a small integer or a string.
+ * - The state never becomes an object on its way back in. It is extracted from the
+ *   response as raw text by [`rawField`] and spliced into the next request as raw text
+ *   by [`withRawField`], so the bytes the planner wrote are the bytes it reads. This is
+ *   the same instinct `dagron-state`'s wire.rs records — "the snapshot is carried
+ *   opaquely as raw JSON; dagron has no business interpreting fingerprints".
+ *
+ * - Everything the page *does* read is parsed by `parseExact` (`json.js`), never by
+ *   `JSON.parse`: any integer past 2^53 arrives as an exact BigInt. That covers the
+ *   fields that exist today and every u64 the contract adds later, which a per-field
+ *   rule could not. Requests are written by `stringifyExact` for the same reason.
  */
 
 import initWasm, { plan as wasmPlan } from "./freshet_wasm.js";
+import { parseExact, stringifyExact } from "./json.js";
 
 let started = null;
 
@@ -49,15 +53,16 @@ export function ready(url = new URL("./freshet_wasm_bg.wasm", import.meta.url)) 
  * include_queue, and optionally `restate`). `priorStateRaw` is the *text* of a
  * previous response's `next_state`, or null for a cold plan.
  *
- * Returns `{ plan, nextStateRaw, responseText }`: `plan` is parsed and safe to render,
- * `nextStateRaw` is exact text to persist, `responseText` is the untouched output.
+ * Returns `{ plan, nextStateRaw, responseText }`: `plan` is parsed exactly (a u64 past
+ * 2^53 is a BigInt), `nextStateRaw` is exact text to persist, `responseText` is the
+ * untouched output.
  */
 export function plan(request, priorStateRaw = null) {
-  let requestText = JSON.stringify(request);
+  let requestText = stringifyExact(request);
   if (priorStateRaw) requestText = withRawField(requestText, "prior_state", priorStateRaw);
   const responseText = wasmPlan(requestText);
   return {
-    plan: JSON.parse(responseText),
+    plan: parseExact(responseText),
     nextStateRaw: rawField(responseText, "next_state"),
     responseText,
   };

@@ -19,8 +19,10 @@
 //!
 //! Over-rebuild is safe; under-rebuild is a data bug, and an incremental project that
 //! differs from a full build is exactly that. So the incremental path runs only when
-//! it can show its result is exact, and otherwise hands the reload to
-//! `build_project_with_hints`, the call the daemon made before this existed:
+//! it can show its result is exact, and otherwise runs the full build — exactly what
+//! `build_project_with_hints` makes of the input, the call the daemon made before this
+//! existed, from one parse of each model that also yields what it reads and the SQL
+//! half of its fingerprint:
 //!
 //! * there is no previous build (the first load);
 //! * the set of model names changed — a name is what turns a table reference into a
@@ -53,8 +55,9 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use freshet_core::{Column, Materialization, Model, Project};
-use freshet_embed::build_project_with_hints;
-use freshet_sql::{analyze, Catalog, ModelLineage};
+use freshet_embed::with_hints;
+use freshet_fingerprint::SqlHash;
+use freshet_sql::{analyze, build_project_taking, Catalog, ModelLineage, Query};
 use sqlparser::ast::{visit_relations, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -113,6 +116,10 @@ pub(crate) struct Outcome {
     pub(crate) reparsed: usize,
     /// `Some` when the full path ran, saying why.
     pub(crate) full_rebuild: Option<FullRebuild>,
+    /// The SQL half of each model's fingerprint, hashed from the trees the full build
+    /// parsed anyway, for the cache to keep so the next plan parses nothing. Empty on
+    /// the incremental path, whose few reparsed models the next plan hashes itself.
+    pub(crate) sql_hashes: BTreeMap<String, SqlHash>,
 }
 
 /// Build the project for `models`, incrementally against `prev` wherever that is exact.
@@ -128,28 +135,28 @@ pub(crate) fn reload(
     let why = match prev {
         None => FullRebuild::FirstLoad,
         Some(prev) => match incremental(prev, models, sources, hints) {
-            Ok((built, reparsed)) => return Ok(Outcome { built, reparsed, full_rebuild: None }),
+            Ok((built, reparsed)) => {
+                return Ok(Outcome { built, reparsed, full_rebuild: None, sql_hashes: BTreeMap::new() });
+            }
             Err(why) => why,
         },
     };
-    let project = build_project_with_hints(models, sources, hints)?;
-    // Parsing each model once more is the price of knowing what it reads; a model whose
-    // SQL the previous build already parsed is not parsed again.
-    let reads = models
-        .iter()
-        .filter_map(|(name, sql)| {
-            let unchanged = prev.and_then(|p| {
-                let same_sql = p.project.get(name).is_some_and(|m| m.sql == *sql);
-                same_sql.then(|| p.reads.get(name).cloned()).flatten()
-            });
-            unchanged.or_else(|| tables_read(sql)).map(|reads| (name.clone(), reads))
-        })
-        .collect();
+    // What each model reads, and its fingerprint's SQL half, come from the tree the
+    // build hands over the moment it is done with it: no model is parsed twice, and no
+    // tree outlives its model's analysis.
+    let mut reads = BTreeMap::new();
+    let mut sql_hashes = BTreeMap::new();
+    let built = build_project_taking(models, sources, None, |name, query| {
+        reads.insert(name.to_string(), relations_of(&query));
+        sql_hashes.insert(name.to_string(), SqlHash::of_query(query));
+    })?;
+    let project = with_hints(built.project, hints);
     let reparsed = project.len();
     Ok(Outcome {
         built: Built { project: Arc::new(project), sources: sources.clone(), reads: Arc::new(reads) },
         reparsed,
         full_rebuild: Some(why),
+        sql_hashes,
     })
 }
 
@@ -383,12 +390,17 @@ fn tables_read(sql: &str) -> Option<BTreeSet<String>> {
     let Some(Statement::Query(query)) = statements.pop() else {
         return None;
     };
+    Some(relations_of(&query))
+}
+
+/// Every table name a parsed query reads, by its last part.
+fn relations_of(query: &Query) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    let _ = visit_relations(&*query, |relation| {
+    let _ = visit_relations(query, |relation| {
         names.insert(relation.0.last().map(|ident| ident.value.clone()).unwrap_or_default());
         ControlFlow::<()>::Continue(())
     });
-    Some(names)
+    names
 }
 
 fn column_names(columns: &[Column]) -> Vec<String> {

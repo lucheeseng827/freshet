@@ -30,7 +30,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
-FIXTURES = pathlib.Path(__file__).with_name("fixtures")
+# The reader this package builds on, beside it in the source tree.
+PLAN_ROOT = PACKAGE_ROOT.parent / "plan"
+# The contract fixtures belong to freshet-plan, the reader this package builds on.
+FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "plan" / "tests" / "fixtures"
 LOGICAL_DATE = "2026-09-22"
 
 DAG_FILE = '''\
@@ -53,7 +56,9 @@ def airflow_home(tmp_path_factory):
         "AIRFLOW_HOME": str(home),
         "AIRFLOW__CORE__DAGS_FOLDER": str(home / "dags"),
         "AIRFLOW__CORE__LOAD_EXAMPLES": "False",
-        "PYTHONPATH": os.pathsep.join(filter(None, [str(PACKAGE_ROOT), os.environ.get("PYTHONPATH")])),
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(PACKAGE_ROOT), str(PLAN_ROOT), os.environ.get("PYTHONPATH")])
+        ),
     }
     airflow(env, "db", "migrate")
     return home, env

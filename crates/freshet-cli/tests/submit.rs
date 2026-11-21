@@ -133,6 +133,51 @@ fn the_body_is_the_plan_the_planner_already_speaks() {
     // to order the run. This is the M6 change being used for what it was for.
     assert_eq!(env["plan"]["models"][0]["depends_on"], serde_json::json!([]));
     assert_eq!(env["plan"]["models"][1]["depends_on"], serde_json::json!(["stg_orders"]));
+    // Contract v6: a warm plan carries no `cold` key, so its JSON is what it was
+    // under v5; only a plan with no state to diff against says it is cold.
+    assert!(env["plan"].get("cold").is_none(), "{}", env["plan"]);
+    // A state file has no versions, so there is none to say the plan was computed
+    // against (hosted state carries `expected_version`: tests/hosted_state.rs).
+    assert!(env.get("expected_version").is_none(), "{env}");
+}
+
+/// `--with-next-state` carries the snapshot a commit after the run will write, so a
+/// consumer that reviews plans can hold the commit to the plan it approved. It is
+/// the same snapshot, to the bit: what `plan --json --with-next-state` prints and what
+/// `plan --commit` then writes.
+#[test]
+fn with_next_state_the_plan_carries_exactly_what_the_commit_will_write() {
+    let dir = project("next-state");
+    warm_up(&dir);
+    assert!(envelope(&dir, &[])["plan"].get("next_state").is_none(), "opt-in only");
+    let env = envelope(&dir, &["--with-next-state"]);
+    let carried = env["plan"]["next_state"].clone();
+    assert!(carried["fingerprints"]["stg_orders"].is_u64(), "{carried}");
+
+    let models = dir.join("models");
+    let state = dir.join("state.json");
+    let (models, state) = (models.to_str().unwrap(), state.to_str().unwrap());
+    let out = freshet(&["plan", "--project", models, "--state", state, "--json", "--with-next-state"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let planned: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(planned["next_state"], carried, "plan and submit carry the same snapshot");
+
+    let out = freshet(&["plan", "--project", models, "--state", state, "--commit"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("state.json")).unwrap()).unwrap();
+    assert_eq!(written["fingerprints"], carried["fingerprints"]);
+    assert_eq!(written["watermarks"], carried["watermarks"]);
+
+    let out = freshet(&["plan", "--project", models, "--state", state, "--with-next-state"]);
+    assert!(!out.status.success(), "--with-next-state is a --json option");
+}
+
+#[test]
+fn a_plan_with_no_state_behind_it_says_it_is_cold() {
+    let dir = project("cold");
+    let env = envelope(&dir, &[]);
+    assert_eq!(env["plan"]["cold"], true, "no state file yet: {}", env["plan"]);
+    assert_eq!(names(&env).len(), 4, "every model, as a cold plan rebuilds");
 }
 
 #[test]

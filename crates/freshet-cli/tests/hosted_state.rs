@@ -1,13 +1,13 @@
 //! `--state https://…` — hosted state — through the real binary, against a fake of
-//! the protocol dagron Cloud's edge serves (`GET …/current`, `POST …/commit`).
+//! the protocol (`GET …/current`, `POST …/commit`, `GET …/history`).
+//! `tests/state_server.rs` runs the same binary against the real `freshet-state-server`.
 //!
 //! The fake is not a mock that answers what a test scripts: it keeps a version and a
 //! snapshot and does the compare-and-swap for real, so a lost race here is lost the
 //! way it is in production — including the one the race test provokes with two
 //! `freshet` processes that plan against the same version and commit at once.
-//! What the server *does* with a commit (Postgres, scopes, metering) is tested on
-//! the hosted state service's (dagron Cloud) side; the question here is what the CLI sends, what it keeps,
-//! and how it fails.
+//! What a server *does* with a commit is the server's to test; the question here is
+//! what the CLI sends, what it keeps, and how it fails.
 
 // Hosted state is optional (`--no-default-features` drops the HTTP client).
 #![cfg(feature = "hosted")]
@@ -49,6 +49,8 @@ struct Store {
     commit_after_next_get: bool,
     /// Serve a snapshot carrying a field no freshet knows.
     extra_field: bool,
+    /// Every landed commit's history row, oldest first, as the server keeps it.
+    history: Vec<Value>,
 }
 
 struct FakeHosted {
@@ -148,11 +150,33 @@ fn serve(mut stream: TcpStream, store: &(Mutex<Store>, Condvar)) {
                     }))
                 } else {
                     let version = s.version.unwrap_or(0) + 1;
+                    // The server's diff against the commit replaced, as the real one
+                    // writes it, plus the committer's own words under `context`.
+                    let (before, after) = (&s.snapshot["fingerprints"], &commit["snapshot"]["fingerprints"]);
+                    let keys = |v: &Value| v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                    let changed: Vec<String> = keys(after).into_iter().filter(|k| before.get(k) != after.get(k)).collect();
+                    let removed: Vec<String> = keys(before).into_iter().filter(|k| after.get(k).is_none()).collect();
+                    let row = json!({
+                        "version": version,
+                        "committed_at": format!("2026-10-27T10:00:{:02}Z", version),
+                        "summary": {"changed": changed, "removed": removed, "watermarks_changed": [], "context": commit["summary"]},
+                    });
+                    s.history.push(row);
                     s.version = Some(version);
                     s.snapshot = commit["snapshot"].clone();
                     s.landed.push(commit);
                     (200, json!({ "version": version }))
                 }
+            }
+            ("GET", path) if path.starts_with("/state/v1/history") => {
+                let limit = path
+                    .split_once("limit=")
+                    .and_then(|(_, n)| n.split('&').next())
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let commits: Vec<Value> = s.history.iter().rev().take(limit).cloned().collect();
+                (200, json!({ "commits": commits, "limit": limit }))
             }
             _ => (404, json!({ "error": "no such hosted state route" })),
         }
@@ -286,6 +310,7 @@ fn a_cold_plan_reads_hosted_state_and_writes_nothing() {
 
     let plan: Value = serde_json::from_str(&stdout(&out)).expect("stdout stays the plan JSON");
     assert_eq!(models(&plan).len(), 4, "no state yet: everything is new");
+    assert_eq!(plan["cold"], true, "and the plan says it is cold (contract v6)");
     let err = stderr(&out);
     assert!(err.contains("hosted state: no commits yet (version none)"), "{err}");
     assert!(err.contains("--commit --expect-version none"), "the commit to run later is spelt out: {err}");
@@ -553,6 +578,14 @@ fn a_restatement_records_and_settles_its_ledger_in_hosted_state() {
 fn submit_plans_against_hosted_state_and_leaves_it_alone() {
     let (hosted, dir) = (FakeHosted::start(), project("submit"));
     let (p, url) = (dir.to_str().unwrap(), hosted.url());
+
+    // The body names the version the plan was computed against, so a consumer that
+    // holds plans for review can refuse one planned against state that has since
+    // moved: `null` before the first commit, then the version it read.
+    let out = ok(freshet(&["submit", "--project", p, "--state", &url, "--dry-run"]));
+    let body: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(body.get("expected_version"), Some(&Value::Null), "{body}");
+
     ok(commit(&dir, &url, &[]));
     write(&dir, "stg_orders.sql", "select order_id, customer_id, amount, 1 as v from raw_orders");
 
@@ -560,6 +593,7 @@ fn submit_plans_against_hosted_state_and_leaves_it_alone() {
     let body: Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(models(&body["plan"]), ["stg_orders", "mart_revenue"]);
     assert_eq!(body["plan"]["cost"]["total_millicu"], 2000, "two tables at the default rate card");
+    assert_eq!(body["expected_version"], 1, "{body}");
 
     // A consumer to submit to: one canned 201.
     let consumer = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -578,4 +612,73 @@ fn submit_plans_against_hosted_state_and_leaves_it_alone() {
     assert!(err.contains(&format!("--state {url} --commit --expect-version 1")), "{err}");
     assert_eq!(hosted.posts(), 1, "only the priming commit: submit never writes state");
     assert_eq!(hosted.version(), Some(1));
+}
+
+// ----------------------------------------------------------------- history --
+
+#[test]
+fn history_lists_every_commit_newest_first_with_what_it_changed() {
+    let hosted = FakeHosted::start();
+    let dir = project("history");
+    let state = hosted.url();
+    ok(commit(&dir, &state, &[]));
+    write(&dir, "stg_orders.sql", "select order_id, customer_id, amount from raw_orders where amount > 0");
+    ok(commit(&dir, &state, &["--expect-version", "1"]));
+
+    let out = ok(freshet(&["history", "--state", &state]));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], format!("{state}: 2 commit(s), newest first"), "{text}");
+    assert!(lines[1].starts_with("  v2 ") && lines[1].contains("1 changed (stg_orders)"), "{text}");
+    assert!(lines[2].starts_with("  v1 ") && lines[2].contains("4 changed (dim_customer, mart_revenue, stg_orders, +1)"), "{text}");
+    assert!(!text.contains("older commits"), "both commits fit: {text}");
+
+    // A page smaller than the history says there is more.
+    let out = ok(freshet(&["history", "--state", &state, "--limit", "1"]));
+    let text = stdout(&out);
+    assert!(text.contains("  v2 ") && !text.contains("  v1 "), "{text}");
+    assert!(text.contains("older commits not shown"), "{text}");
+
+    // --json is the server's commits, whole.
+    let out = ok(freshet(&["history", "--state", &state, "--json"]));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["commits"][0]["version"], 2);
+    assert_eq!(v["commits"][0]["summary"]["changed"], json!(["stg_orders"]));
+    assert_eq!(v["limit"], 20);
+    let gets: Vec<String> = hosted.seen().into_iter().filter(|r| r.path.contains("history")).map(|r| r.path).collect();
+    assert_eq!(gets, ["/state/v1/history?limit=20", "/state/v1/history?limit=1", "/state/v1/history?limit=20"]);
+}
+
+#[test]
+fn before_against_a_server_that_does_not_page_is_refused_not_shown_as_older() {
+    // The fake answers like a server without paging: no `next_before`, and `before`
+    // ignored, so its reply is the newest page again.
+    let hosted = FakeHosted::start();
+    let dir = project("history-before");
+    let state = hosted.url();
+    ok(commit(&dir, &state, &[]));
+    let out = freshet(&["history", "--state", &state, "--before", "5"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("does not page its history: it ignored --before 5"), "{}", stderr(&out));
+}
+
+#[test]
+fn history_of_a_state_file_says_there_is_none() {
+    let dir = project("history-file");
+    let state = dir.join("state.json");
+    let out = freshet(&["history", "--state", state.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("keeps only the current snapshot"), "{}", stderr(&out));
+}
+
+#[test]
+fn history_without_a_token_is_refused_by_the_server_and_says_so() {
+    let hosted = FakeHosted::start();
+    let out = Command::new(env!("CARGO_BIN_EXE_freshet"))
+        .args(["history", "--state", &hosted.url()])
+        .env("FRESHET_STATE_TOKEN", "not-the-token")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("refused to list history (HTTP 401): invalid api token"), "{}", stderr(&out));
 }

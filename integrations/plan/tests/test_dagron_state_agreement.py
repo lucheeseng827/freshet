@@ -25,8 +25,8 @@ import subprocess
 
 import pytest
 
-from freshet_airflow import compile_plan
-from freshet_airflow.dag import _summary
+from freshet_plan import compile_plan
+from freshet_plan.explain import summary
 
 BIN = os.environ.get("FRESHET_DAGRON_STATE_BIN")
 pytestmark = pytest.mark.skipif(
@@ -133,7 +133,7 @@ def test_both_readers_name_and_wire_every_task_the_same_way(tmp_path, case, orde
     assert [(row["model"], row["task"], row["depends_on"]) for row in theirs["rows"]] == [
         (t.model.name, t.task_id, list(t.upstream)) for t in ours
     ]
-    assert theirs["summary"] == _summary(ours, graph), "and the same headline"
+    assert theirs["summary"] == summary(ours, graph), "and the same headline"
 
 
 @pytest.mark.parametrize("case", sorted(CASES))

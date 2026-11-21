@@ -21,20 +21,21 @@ Two Cargo workspaces, one dependency direction:
   embeddable facade). It never depends on anything outside `core/`.
 - `.` — everything built on it: `freshet-incremental`, `freshet-fingerprint`,
   `freshet-render`, `freshet-embed` (the frozen JSON wire contract), `freshet-dbt`,
-  `freshet-cli` (the `freshet` binary), `freshet-serve`, `freshet-ffi`,
+  `freshet-cli` (the `freshet` binary), `freshet-serve`, `freshet-state-server`, `freshet-ffi`,
   `freshet-wasm`, `freshet-py` and `freshet-bench`.
-- `sdks/python`, `integrations/airflow`, `apps/` — the Python client, the Airflow
-  adapter and the effort-map apps.
+- `sdks/python`, `integrations/`, `apps/` — the Python client; the plan reader
+  (`integrations/plan`), the Airflow and Dagster adapters built on it, and the
+  translator; and the effort-map apps.
 
 ## Development
 
 ```bash
 (cd core && cargo test --workspace --locked)
 cargo test --locked                                   # default members
-cargo test --locked -p freshet-serve --features http
+cargo test --locked -p freshet-serve --features http,watch
 cargo fmt --all && cargo clippy --all-targets -- -D warnings
 (cd sdks/python && python -m unittest -v)
-(cd integrations/airflow && python -m pytest -q)
+for pkg in plan airflow dagster; do (cd integrations/$pkg && python -m pytest -q); done
 ```
 
 ## Expectations

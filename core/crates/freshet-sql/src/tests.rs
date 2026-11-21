@@ -630,3 +630,402 @@ fn a_set_returning_function_in_the_projection_decides_the_rows() {
         );
     }
 }
+
+// ---- undeclared tables: a typo'd reference is not an external table ----------
+
+fn pairs(models: &[(&str, &str)]) -> Vec<(String, String)> {
+    models
+        .iter()
+        .map(|(n, sql)| (n.to_string(), sql.to_string()))
+        .collect()
+}
+
+/// `(model, table, candidates)` for every undeclared table, lenient build.
+fn undeclared(
+    sources: &[(&str, &[&str])],
+    models: &[(&str, &str)],
+) -> Vec<(String, String, Vec<String>)> {
+    build_project_with(&pairs(models), &cat(sources), Undeclared::External)
+        .unwrap()
+        .undeclared
+        .into_iter()
+        .map(|u| (u.model, u.table, u.candidates))
+        .collect()
+}
+
+fn refused(sources: &[(&str, &[&str])], models: &[(&str, &str)]) -> UndeclaredTables {
+    let err = build_project_with(&pairs(models), &cat(sources), Undeclared::Refuse).unwrap_err();
+    err.downcast::<UndeclaredTables>()
+        .unwrap_or_else(|e| panic!("not an UndeclaredTables refusal: {e:#}"))
+}
+
+#[test]
+fn a_misspelled_model_is_refused_with_the_model_it_meant() {
+    // The shortfall exactly: `stgg` was an external table, so `mart` had no edge to
+    // `stg` and the two ran side by side.
+    let models = [("stg", "select a from raw"), ("mart", "select a from stgg")];
+    let lenient = build_project(&pairs(&models), &cat(&[("raw", &["a"])])).unwrap();
+    assert!(
+        lenient.get("mart").unwrap().depends_on.is_empty(),
+        "the hazard this guards"
+    );
+
+    let err = refused(&[("raw", &["a"])], &models);
+    assert_eq!(
+        err.0,
+        vec![UndeclaredTable {
+            model: "mart".into(),
+            table: "stgg".into(),
+            candidates: vec!["stg".into()],
+        }]
+    );
+    let text = err.to_string();
+    assert!(
+        text.starts_with("model `mart` reads `stgg`, which is neither a model nor a declared source: did you mean `stg`?"),
+        "got: {text}"
+    );
+}
+
+#[test]
+fn the_lenient_build_reports_what_the_strict_one_refuses() {
+    let models = [("stg", "select a from raw"), ("mart", "select a from stgg")];
+    let built = build_project_with(
+        &pairs(&models),
+        &cat(&[("raw", &["a"])]),
+        Undeclared::External,
+    )
+    .unwrap();
+    assert_eq!(built.project.names().count(), 2);
+    assert_eq!(built.undeclared.len(), 1);
+    assert_eq!(built.undeclared[0].candidates, vec!["stg".to_string()]);
+}
+
+#[test]
+fn models_and_declared_sources_are_not_undeclared() {
+    let none = undeclared(
+        &[("raw", &["a"]), ("events", &[])],
+        &[
+            ("stg", "select a from raw join events using (a)"),
+            // Unquoted names fold; a schema does not hide the model.
+            ("m1", "select a from STG"),
+            ("m2", "select a from analytics.stg"),
+            ("m3", "select a from \"db\".\"public\".raw"),
+        ],
+    );
+    assert!(none.is_empty(), "got: {none:?}");
+}
+
+#[test]
+fn each_undeclared_table_is_named_once_per_model_as_written() {
+    let got = undeclared(
+        &[],
+        &[
+            (
+                "a",
+                "select x from raw.events e join raw.events f using (x)",
+            ),
+            ("b", "select x from raw.events"),
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            ("a".into(), "raw.events".into(), vec![]),
+            ("b".into(), "raw.events".into(), vec![]),
+        ]
+    );
+}
+
+#[test]
+fn a_cte_is_not_a_table_where_sql_resolves_the_name_to_it() {
+    let none = undeclared(
+        &[("raw", &["x"])],
+        &[
+            ("top", "with t as (select x from raw) select x from t"),
+            ("nested", "select x from (with t as (select x from raw) select x from t) s"),
+            ("in_where", "select x from raw where x in (with t as (select x from raw) select x from t)"),
+            // A query nested in a later CTE's body sees the earlier CTEs.
+            ("later", "with a as (select x from raw), b as (select x from (select x from a) s) select x from b"),
+            ("outer", "with a as (select x from raw) select x from (select x from a) s"),
+            ("recursive", "with recursive r as (select x from raw union all select x from r) select x from r"),
+        ],
+    );
+    assert!(none.is_empty(), "got: {none:?}");
+}
+
+#[test]
+fn a_cte_does_not_hide_a_table_where_sql_reads_the_table() {
+    let got = undeclared(
+        &[],
+        &[
+            // The import CTE: its own body reads the real `orders`.
+            (
+                "import",
+                "with orders as (select id from orders) select id from orders",
+            ),
+            // A non-recursive CTE cannot see the CTEs after it.
+            (
+                "ahead",
+                "with a as (select x from b), b as (select 1 as x) select x from a",
+            ),
+            // A nested CTE is not visible to the outer query.
+            (
+                "escaped",
+                "select x from (with t as (select 1 as x) select x from t) s join t using (x)",
+            ),
+            // A qualified name is never a CTE.
+            ("qualified", "with t as (select 1 as x) select x from s.t"),
+        ],
+    );
+    let tables: Vec<(&str, &str)> = got
+        .iter()
+        .map(|(m, t, _)| (m.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(
+        tables,
+        vec![
+            ("import", "orders"),
+            ("ahead", "b"),
+            ("escaped", "t"),
+            ("qualified", "s.t")
+        ]
+    );
+}
+
+#[test]
+fn every_place_a_table_can_be_read_is_checked() {
+    let got = undeclared(
+        &[("raw", &["x"])],
+        &[
+            (
+                "subquery",
+                "select x from raw where x in (select x from stgg)",
+            ),
+            (
+                "exists",
+                "select x from raw where exists (select 1 from stgg)",
+            ),
+            ("union", "select x from raw union all select x from stgg"),
+            ("join", "select raw.x from raw join stgg on raw.x = stgg.x"),
+            ("scalar", "select (select max(x) from stgg) as m from raw"),
+        ],
+    );
+    let models: Vec<&str> = got.iter().map(|(m, _, _)| m.as_str()).collect();
+    assert_eq!(
+        models,
+        vec!["subquery", "exists", "union", "join", "scalar"]
+    );
+}
+
+#[test]
+fn a_table_function_is_not_a_table() {
+    let none = undeclared(&[], &[("g", "select x from generate_series(1, 3) as g(x)")]);
+    assert!(none.is_empty(), "got: {none:?}");
+}
+
+#[test]
+fn every_undeclared_table_is_refused_at_once() {
+    let err = refused(
+        &[],
+        &[
+            ("stg", "select 1 as a"),
+            ("m1", "select a from stgg"),
+            ("m2", "select a from sgt join raw_users using (a)"),
+        ],
+    );
+    assert_eq!(err.0.len(), 3);
+    let text = err.to_string();
+    assert!(
+        text.starts_with("3 tables are neither models nor declared sources:"),
+        "got: {text}"
+    );
+    assert!(text.contains("\n  model `m2` reads `sgt`, which is neither a model nor a declared source: did you mean `stg`?"));
+    assert!(text.contains(
+        "\n  model `m2` reads `raw_users`, which is neither a model nor a declared source\n"
+    ));
+    assert!(
+        text.ends_with("an empty column list declares it without its columns)"),
+        "got: {text}"
+    );
+}
+
+#[test]
+fn an_empty_column_list_declares_a_source_whose_columns_are_unknown() {
+    let sources = cat(&[("events", &[])]);
+    let built = build_project_with(
+        &pairs(&[("m", "select user_id from events")]),
+        &sources,
+        Undeclared::Refuse,
+    )
+    .unwrap();
+    // Unknown columns, so nothing about `user_id` is proven: the safe answer.
+    assert!(built.project.get("m").unwrap().columns[0]
+        .upstream
+        .is_empty());
+
+    // And `*` over it is refused, never expanded to no columns at all.
+    let err = build_project(&pairs(&[("m", "select * from events")]), &sources).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("schema is unknown"),
+        "got: {err:#}"
+    );
+}
+
+#[test]
+fn star_over_a_model_with_no_derivable_columns_still_expands_to_none() {
+    // An empty list means "declared without its columns" only for a source, which
+    // someone wrote down. A model whose columns cannot be derived (a VALUES body) is
+    // the planner's own reading, and `*` over it expands to nothing, as it always did.
+    let built = build_project(
+        &pairs(&[("v", "values (1, 2)"), ("m", "select * from v")]),
+        &Catalog::new(),
+    )
+    .expect("a model with no derivable columns is not a source to declare");
+    assert!(built.get("m").unwrap().columns.is_empty());
+    assert_eq!(built.get("m").unwrap().depends_on, ["v"]);
+}
+
+#[test]
+fn candidates_are_the_closest_names_ignoring_case_and_at_most_three() {
+    let got = undeclared(
+        &[("orders", &["a"]), ("order_items", &["a"])],
+        &[
+            ("ordrs", "select 1 as a"),
+            ("Orderz", "select 1 as a"),
+            ("odrers", "select 1 as a"),
+            ("ordersx", "select 1 as a"),
+            ("m", "select a from \"ORDERS\""),
+            ("n", "select a from xyz"),
+        ],
+    );
+    assert_eq!(got.len(), 2, "got: {got:?}");
+    // A quoted name does not fold, but case is still the likeliest typo. The
+    // fourth name, one edit away like the rest, is left out; `order_items`, more
+    // than one edit away, is never in.
+    assert_eq!(got[0].1, "\"ORDERS\"");
+    assert_eq!(
+        got[0].2,
+        vec!["orders".to_string(), "Orderz".into(), "odrers".into()]
+    );
+    assert_eq!(got[1].2, Vec::<String>::new());
+}
+
+fn edits(a: &str, b: &str, bound: usize) -> Option<usize> {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    edits_within(&a, &b, bound)
+}
+
+#[test]
+fn the_index_finds_every_name_one_edit_away_and_no_other() {
+    // Every one-edit change of `orders`, and a few two-edit ones.
+    let base = "orders";
+    let mut near: BTreeSet<String> = BTreeSet::new();
+    let chars: Vec<char> = base.chars().collect();
+    for i in 0..=chars.len() {
+        for c in ['x', 'r', 'S'] {
+            let mut ins = chars.clone();
+            ins.insert(i, c);
+            near.insert(ins.into_iter().collect());
+        }
+        if i < chars.len() {
+            let mut del = chars.clone();
+            del.remove(i);
+            near.insert(del.iter().collect());
+            let mut sub = chars.clone();
+            sub[i] = 'q';
+            near.insert(sub.into_iter().collect());
+        }
+        if i + 1 < chars.len() {
+            let mut swap = chars.clone();
+            swap.swap(i, i + 1);
+            near.insert(swap.into_iter().collect());
+        }
+    }
+    let far = ["ordxrsx", "osdxrs", "redros", "ord", "order_items"].map(String::from);
+    let names: Vec<String> = near.iter().chain(&far).cloned().collect();
+    let index = Spellings::of(names.iter());
+    // The lookup returns at most three, so ask from each name's side instead.
+    for name in &near {
+        assert_eq!(
+            Spellings::of(std::iter::once(name)).within_one_edit(base),
+            vec![name.clone()],
+            "{name}"
+        );
+    }
+    for name in &far {
+        assert!(
+            Spellings::of(std::iter::once(name))
+                .within_one_edit(base)
+                .is_empty(),
+            "{name}"
+        );
+    }
+    assert_eq!(index.within_one_edit(base).len(), 3);
+}
+
+#[test]
+fn edit_distance_counts_an_adjacent_swap_as_one_edit() {
+    assert_eq!(edits("stg", "sgt", 1), Some(1));
+    assert_eq!(edits("stg", "stgg", 1), Some(1));
+    assert_eq!(edits("stg", "stg", 1), Some(0));
+    assert_eq!(edits("foo", "bar", 1), None);
+    assert_eq!(edits("ab", "abcd", 1), None);
+    assert_eq!(edits("kitten", "sitting", 3), Some(3));
+    assert_eq!(edits("kitten", "sitting", 2), None);
+    assert_eq!(edits("", "ab", 2), Some(2));
+    assert_eq!(edits("ab", "", 2), Some(2));
+    assert_eq!(
+        edits("ca", "abc", 3),
+        Some(3),
+        "optimal string alignment, not Damerau"
+    );
+}
+
+/// The banded, early-exit distance agrees with the full table on every pair of
+/// short strings over a small alphabet, at every bound.
+#[test]
+fn edit_distance_agrees_with_the_full_table() {
+    fn full(a: &[char], b: &[char]) -> usize {
+        let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for (i, row) in d.iter_mut().enumerate() {
+            row[0] = i;
+        }
+        for (j, cell) in d[0].iter_mut().enumerate() {
+            *cell = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                let cost = usize::from(a[i - 1] != b[j - 1]);
+                d[i][j] = (d[i - 1][j] + 1)
+                    .min(d[i][j - 1] + 1)
+                    .min(d[i - 1][j - 1] + cost);
+                if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                    d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+                }
+            }
+        }
+        d[a.len()][b.len()]
+    }
+    let mut words: Vec<Vec<char>> = vec![vec![]];
+    for _ in 0..4 {
+        let longer: Vec<Vec<char>> = words
+            .iter()
+            .filter(|w| w.len() == words.last().unwrap().len())
+            .flat_map(|w| "abc".chars().map(move |c| [w.clone(), vec![c]].concat()))
+            .collect();
+        words.extend(longer);
+    }
+    for a in &words {
+        for b in &words {
+            let d = full(a, b);
+            for bound in 1..=3 {
+                assert_eq!(
+                    edits_within(a, b, bound),
+                    (d <= bound).then_some(d),
+                    "{a:?} {b:?} {bound}"
+                );
+            }
+        }
+    }
+}

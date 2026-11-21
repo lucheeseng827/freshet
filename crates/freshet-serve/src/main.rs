@@ -10,18 +10,18 @@
 //! curl -s localhost:8788/rpc -d '{"op":"plan","include_cost":true,"include_queue":true}'
 //! ```
 //!
-//! The models are loaded once at startup. Reloading is a `{"op":"reload"}` request —
-//! the daemon does not watch the filesystem (that is the off-by-default `watch`
-//! feature), because a planner that reparses under a client mid-plan would invalidate
-//! that client's commit token without it ever having asked for a reload.
+//! The models are loaded once at startup. Reloading is a `{"op":"reload"}` request, or,
+//! with `--watch` (the `watch` feature), the files changing on disk: opted into,
+//! because a watched edit is a reload, and a plan staged before it can no longer commit.
+//!
+//! Set `FRESHET_SERVE_TOKEN` and `/rpc` requires `Authorization: Bearer <token>`.
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use freshet_serve::{http, ProjectCache, Request, Response};
+use freshet_serve::{http, ProjectCache, ProjectFiles, Response};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -61,55 +61,55 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     incremental: Option<PathBuf>,
 
+    /// Reload from disk whenever `--project`'s `.sql` files (or the `--sources`,
+    /// `--materializations`, `--incremental` files) change, once they are quiet. A plan
+    /// staged before an edit a plan would see can then no longer commit: the stale
+    /// guard rejects it, as it would after any reload.
+    #[cfg(feature = "watch")]
+    #[arg(long, requires = "project")]
+    watch: bool,
+
     #[arg(long, default_value_t = 8788)]
     port: u16,
 
-    /// The address to bind. Defaults to loopback: there is no authentication in this
-    /// version, and binding anything else prints a warning saying what that means.
+    /// The address to bind. Defaults to loopback. Anywhere else, set
+    /// `FRESHET_SERVE_TOKEN` so `/rpc` requires `Authorization: Bearer <token>`;
+    /// without it the daemon warns that anyone who can reach it can use it.
     #[arg(long, default_value = "127.0.0.1")]
     host: IpAddr,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let token = match std::env::var(http::TOKEN_ENV) {
+        Ok(t) if t.trim().is_empty() => anyhow::bail!("{} is set but empty", http::TOKEN_ENV),
+        Ok(t) => Some(t),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => anyhow::bail!("{}: {e}", http::TOKEN_ENV),
+    };
     let cache = Arc::new(ProjectCache::new());
 
-    if let Some(dir) = &cli.project {
-        let models = read_models(dir)?;
-        let count = models.len();
-        let sources = match &cli.sources {
-            Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
-            None => Default::default(),
-        };
-        let materializations: BTreeMap<String, String> = match &cli.materializations {
-            Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
-            None => BTreeMap::new(),
-        };
-        let incremental = match &cli.incremental {
-            Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
-            None => Default::default(),
-        };
+    let files = cli.project.as_ref().map(|dir| ProjectFiles {
+        dir: dir.clone(),
+        sources: cli.sources.clone(),
+        materializations: cli.materializations.clone(),
+        incremental: cli.incremental.clone(),
+    });
+    if let Some(files) = &files {
         // Fail at startup rather than on the first request: a daemon that accepts a
         // connection is claiming it has a project, and a bad `--project` is an
         // operator error worth exiting for.
-        match cache.handle(Request::Reload {
-            models,
-            sources,
-            materializations,
-            incremental,
-        }) {
-            Response::Reloaded { models, .. } => {
-                eprintln!("loaded {models} model(s) from {}", dir.display());
-            }
-            Response::Error { message } => anyhow::bail!("loading {}: {message}", dir.display()),
+        let dir = files.dir.display();
+        match cache.handle(files.reload_request().map_err(|e| anyhow::anyhow!("loading {dir}: {e:#}"))?) {
+            Response::Reloaded { models, .. } => eprintln!("loaded {models} model(s) from {dir}"),
+            Response::Error { message } => anyhow::bail!("loading {dir}: {message}"),
             other => anyhow::bail!("unexpected reload response: {other:?}"),
         }
-        debug_assert_eq!(count, cache_len(&cache));
     } else {
-        // These three are read only inside the branch above. Without `--project` they are
-        // silently inert, and a silently ignored `--incremental` is the worst of the three:
-        // the daemon then plans with no replace ops at all, which looks like a correct plan
-        // for a project that declared none.
+        // These three are read only alongside `--project`. Without it they are
+        // silently inert, and a silently ignored `--incremental` is the worst of the
+        // three: the daemon then plans with no replace ops at all, which looks like a
+        // correct plan for a project that declared none.
         if cli.incremental.is_some() || cli.sources.is_some() || cli.materializations.is_some() {
             eprintln!(
                 "warning: --incremental, --sources and --materializations are read only \
@@ -120,51 +120,39 @@ fn main() -> anyhow::Result<()> {
         eprintln!("no --project given; send a `{{\"op\":\"reload\"}}` request to load one");
     }
 
+    // Held until the server returns: dropping it stops the watch.
+    #[cfg(feature = "watch")]
+    let _watching = match (&files, cli.watch) {
+        (Some(files), true) => {
+            let dir = files.dir.display().to_string();
+            eprintln!("watching {dir} for changes");
+            Some(freshet_serve::watch::start(
+                cache.clone(),
+                files.clone(),
+                freshet_serve::watch::QUIET,
+                move |response| match response {
+                    Response::Reloaded { revision, models, reparsed, .. } => {
+                        eprintln!("{dir} changed: reloaded {models} model(s), reparsed {reparsed}, revision {revision}")
+                    }
+                    Response::Error { message } => {
+                        eprintln!("{dir} changed, and the reload failed (still serving the previous project): {message}")
+                    }
+                    other => eprintln!("{dir} changed: unexpected reload response {other:?}"),
+                },
+            )?)
+        }
+        (None, true) => anyhow::bail!("--watch needs --project: there is nothing on disk to watch"),
+        (_, false) => None,
+    };
+
     let addr = SocketAddr::new(cli.host, cli.port);
-    http::warn_if_exposed(addr);
-    eprintln!("freshet-serve listening on http://{addr}");
+    http::warn_if_exposed(addr, token.is_some());
+    let auth = if token.is_some() { " (/rpc requires the bearer token)" } else { "" };
+    eprintln!("freshet-serve listening on http://{addr}{auth}");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(http::serve(cache, addr))?;
+        .block_on(http::serve(cache, addr, token))?;
     Ok(())
-}
-
-/// How many models the cache holds, via the public surface (the graph order).
-fn cache_len(cache: &ProjectCache) -> usize {
-    match cache.handle(Request::Graph) {
-        Response::Graph { order, .. } => order.len(),
-        _ => 0,
-    }
-}
-
-/// Read `*.sql` from `dir`, non-recursively, as `(model name, SQL)` pairs.
-///
-/// Non-recursive on purpose: nested directories in dbt-shaped projects carry meaning
-/// (staging/marts/…) that this daemon has no model for, and flattening them would
-/// silently collide two models named `orders.sql` in different folders. A project
-/// laid out that way should be described by a `reload` request, which names each
-/// model explicitly.
-fn read_models(dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("reading project directory {}: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("sql") {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-            anyhow::bail!("model file name is not valid UTF-8: {}", path.display());
-        };
-        out.push((name.to_string(), std::fs::read_to_string(&path)?));
-    }
-    if out.is_empty() {
-        anyhow::bail!("no .sql files in {}", dir.display());
-    }
-    // Deterministic order: `read_dir` yields in filesystem order, which differs
-    // between machines, and the project's model order reaches the plan's output.
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
 }

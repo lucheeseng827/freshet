@@ -2,7 +2,8 @@
 
 This is the Airflow half, and it is thin on purpose. Every decision about the plan
 (which task waits for which, what each is called, what its command says) is made in
-:mod:`freshet_airflow.plan`, which cannot import Airflow. What is left here is
+``freshet-plan``, which imports no orchestrator, and the words a DAG's docs use come
+from :mod:`freshet_plan.explain`, as Dagster's do. What is left here is
 choosing an operator per task and refusing inputs that would make that choice
 ambiguous or unsafe.
 
@@ -30,23 +31,29 @@ ones that do not.
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .plan import (
+from freshet_plan import (
     NoCommand,
     PlanInput,
     PlanModel,
     RefusedRequest,
-    Replace,
     Sql,
     Task,
     compile_plan,
     misspelled_placeholders,
-    protect_from_jinja,
 )
+from freshet_plan.explain import count as _count
+from freshet_plan.explain import summary as _summary
+from freshet_plan.explain import ticked as _ticked
+from freshet_plan.explain import unit_words as _unit_words
+from freshet_plan.explain import warnings as _warnings
+from freshet_plan.explain import why as _why
+from freshet_plan.explain import writes_words as _writes_words
+
+from .plan import protect_from_jinja
 
 __all__ = ["OperatorSpec", "plan_operators", "build_dag", "DEFAULT_TAGS"]
 
@@ -108,7 +115,7 @@ def plan_operators(
     """Decide every task of the DAG :func:`build_dag` would build, without Airflow.
 
     Raises what :func:`freshet_airflow.plan.compile_plan` raises, then
-    :class:`~freshet_airflow.plan.NoCommand` when nothing would run and
+    :class:`~freshet_plan.NoCommand` when nothing would run and
     :class:`~freshet_airflow.plan.RefusedRequest` for an ambiguous or unsafe request.
     """
     return _prepare(
@@ -149,7 +156,7 @@ def build_dag(
     ``ordering="sequential"`` chains the plan instead of deriving edges.
 
     ``dag_kwargs`` go to the DAG constructor and override these defaults: no
-    schedule (a state plan has no cron; it is triggered, per ADR-0001), no catchup,
+    schedule (a state plan has no cron; it is triggered), no catchup,
     tags ``freshet`` and ``state-plan``, and a ``doc_md`` explaining the plan. Use its
     ``default_args`` for retries, pools and the like. They cannot override the
     SQL operator's ``autocommit``, ``parameters`` or ``split_statements``: those are
@@ -235,7 +242,10 @@ def _execution_kind(
         )
     has_command = bool(command_template and command_template.strip())
     if not has_command and not conn_id:
-        raise NoCommand()
+        raise NoCommand(
+            "command_template (a shell command per model, run by BashOperator) or conn_id "
+            "(runs the SQL Freshet rendered for each model, contract v4)"
+        )
     if has_command and conn_id:
         raise RefusedRequest(
             "pass command_template or conn_id, not both: conn_id runs the SQL Freshet "
@@ -299,29 +309,6 @@ def _check_command(template: str, jinja_environment_kwargs: Optional[Mapping[str
         )
 
 
-def _warnings(model: PlanModel, runs_sql: bool) -> Tuple[str, ...]:
-    """The notes that must not be missed, one sentence each.
-
-    A widened replace op is always worth saying, whatever runs the model: it is the
-    difference between rewriting two partitions and rewriting a table. A non-atomic
-    write matters only when this task actually runs the rendered statements.
-    """
-    out: List[str] = []
-    if model.replace is not None and model.replace.widened is not None:
-        out.append(
-            f"`{model.name}` was widened to a full refresh of the whole relation: "
-            f"{model.replace.widened.explain()}."
-        )
-    if runs_sql and model.sql is not None and not model.sql.atomic:
-        out.append(
-            f"`{model.name}` is a non-atomic write: the planner does not promise that its "
-            f"{_count(len(model.sql.statements), 'statement')} apply all or nothing, so a "
-            "failure part-way can leave the relation partially written. A retry runs the "
-            "task again from its first statement; check the relation before clearing it."
-        )
-    return tuple(out)
-
-
 # ── explaining ─────────────────────────────────────────────────────────────────
 
 
@@ -377,58 +364,6 @@ def _dag_doc(summary: str, tasks: Sequence[Task], specs: Sequence[OperatorSpec])
     return "\n".join(lines) + "\n"
 
 
-def _summary(tasks: Sequence[Task], graph: Optional[Mapping[str, Sequence[str]]]) -> str:
-    """dagron-state's headline: a pruning percentage only when the project size is known.
-
-    A plan sees the models it selected, never the ones it skipped, so without a
-    ``graph`` the saving is not measurable, and saying so beats implying one.
-    """
-    selected = len(tasks)
-    plural = "model" if selected == 1 else "models"
-    total = None
-    if graph is not None:
-        names = {t.model.name for t in tasks}
-        for model, upstreams in graph.items():
-            names.add(model)
-            names.update(upstreams)
-        total = len(names)
-    if total is not None and total >= selected and total > 0:
-        pruned = total - selected
-        # Rust's f64::round, which rounds half away from zero; Python's round()
-        # rounds half to even, and the two headlines should not disagree on 12.5%.
-        exact = pruned / total * 100.0
-        floor = math.floor(exact)
-        pct = floor + (1 if exact - floor >= 0.5 else 0)
-        return f"{selected} of {total} {plural} rebuild — {pct}% pruned"
-    return f"{selected} {plural} rebuild (project size unknown — pass `graph` to report pruning)"
-
-
-def _why(model: PlanModel) -> str:
-    if model.because_of is None:
-        return "directly changed"
-    if not model.via_columns:
-        return f"downstream of `{model.because_of}`"
-    return f"downstream of `{model.because_of}` via {_ticked(model.via_columns)}"
-
-
-def _unit_words(model: PlanModel) -> str:
-    if model.partitions is None:
-        return "full model"
-    return _count(len(model.partitions), "partition")
-
-
-def _writes_words(replace: Replace) -> str:
-    """One write, in words: the declaration, never a statement (dagron-state's ``writes_words``)."""
-    if replace.target_partitions is None:
-        scope = "the whole relation"
-    else:
-        scope = _count(len(replace.target_partitions), "partition")
-        if replace.partition_column is not None:
-            scope += f" on `{replace.partition_column}`"
-    key = f" on key {_ticked(replace.unique_key)}" if replace.unique_key else ""
-    return f"`{replace.strategy}` over {scope}{key}"
-
-
 def _sql_words(sql: Sql, kind: str, runs_sql: bool) -> str:
     what = f"{_count(len(sql.statements), 'statement')} in `{sql.dialect}`"
     if kind == "sql":
@@ -440,20 +375,12 @@ def _sql_words(sql: Sql, kind: str, runs_sql: bool) -> str:
     return f"{what}, rendered by Freshet; this task's command does not use them"
 
 
-def _ticked(names: Sequence[str]) -> str:
-    return ", ".join(f"`{n}`" for n in names)
-
-
 def _names(names: Sequence[str]) -> str:
     return f"{_count(len(names), 'model')} ({_ticked(names)})"
 
 
 def _carry(names: Sequence[str]) -> str:
     return "carries" if len(names) == 1 else "carry"
-
-
-def _count(n: int, noun: str) -> str:
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 # ── constructing ───────────────────────────────────────────────────────────────

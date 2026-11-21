@@ -1,8 +1,7 @@
 //! freshet-dbt — point Freshet at an existing dbt project and show what it would have
 //! pruned.
 //!
-//! The adoption wedge (the planner core's product roadmap, Phase 1): a team
-//! already running dbt gets a number about *their* project — "of the models your last
+//! A team already running dbt gets a number about *their* project — "of the models your last
 //! run built, this change needed these" — without adopting anything. Nothing here runs
 //! dbt, parses Jinja beyond `ref()`/`source()`, or touches a warehouse: it reads the
 //! artifacts dbt already wrote.

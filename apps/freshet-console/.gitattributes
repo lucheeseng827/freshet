@@ -1,0 +1,13 @@
+# Served byte for byte by freshet-state-server (and by any static host an install uses), so
+# the bytes in git are the bytes served: text is LF everywhere, and the fonts and
+# images are never touched — a line-ending rewrite inside a woff2 corrupts it, and
+# the failure looks like a font that silently won't load.
+*.html   text eol=lf
+*.css    text eol=lf
+*.js     text eol=lf
+*.mjs    text eol=lf
+*.svg    text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.webp   binary
+*.woff2  binary

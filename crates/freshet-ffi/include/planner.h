@@ -22,7 +22,7 @@ extern "C" {
 // contract's required fields.
 uint32_t planner_abi_version(void);
 
-// The wire contract revision [`planner_plan`] speaks, e.g. `"planner-embed/5"`. A
+// The wire contract revision [`planner_plan`] speaks, e.g. `"planner-embed/6"`. A
 // static string: do **not** pass it to [`planner_string_free`]. Adding this symbol
 // did not change any existing one, so the ABI version stays 1.
 const char *planner_contract_version(void);

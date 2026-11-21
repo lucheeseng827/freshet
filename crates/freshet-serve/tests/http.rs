@@ -16,6 +16,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Start a daemon on an ephemeral port with a three-model project loaded.
 async fn daemon() -> SocketAddr {
+    daemon_with(None).await
+}
+
+/// [`daemon`], requiring `token` on `/rpc` when there is one.
+async fn daemon_with(token: Option<&str>) -> SocketAddr {
     let cache = Arc::new(ProjectCache::new());
     cache.handle(Request::Reload {
         models: vec![
@@ -32,8 +37,26 @@ async fn daemon() -> SocketAddr {
     // dropping it leaves a window for another process to take that port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { http::serve_on(cache, listener).await });
+    let token = token.map(str::to_string);
+    tokio::spawn(async move { http::serve_on_with(cache, listener, token).await });
     addr
+}
+
+/// One exchange with extra request headers; the status line and headers, and the body.
+async fn exchange(addr: SocketAddr, method: &str, path: &str, extra: &str, body: &[u8]) -> (String, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{extra}\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let (headers, body) = text.split_once("\r\n\r\n").expect("headers, blank line, body");
+    (headers.to_string(), body.to_string())
 }
 
 /// A whole HTTP/1.1 exchange in twenty lines. `Connection: close` means the body is
@@ -85,6 +108,7 @@ async fn a_plan_over_http_carries_the_effort_map_and_the_queue() {
         3,
         "cold plan: all three"
     );
+    assert_eq!(v["plan"]["cold"], true, "and it says so (contract v6)");
 
     // Three Table models on the default rate card: one whole CU (1_000 mCU) each.
     assert_eq!(v["plan"]["cost"]["total_millicu"], 3_000);
@@ -188,9 +212,68 @@ async fn a_reload_over_http_reports_what_it_reparsed() {
 }
 
 #[test]
-fn loopback_is_silent_and_anything_else_warns() {
-    assert!(!http::warn_if_exposed("127.0.0.1:8788".parse().unwrap()));
-    assert!(!http::warn_if_exposed("[::1]:8788".parse().unwrap()));
-    assert!(http::warn_if_exposed("0.0.0.0:8788".parse().unwrap()));
-    assert!(http::warn_if_exposed("192.168.1.10:8788".parse().unwrap()));
+fn loopback_is_silent_and_anything_else_without_a_token_warns() {
+    assert!(!http::warn_if_exposed("127.0.0.1:8788".parse().unwrap(), false));
+    assert!(!http::warn_if_exposed("[::1]:8788".parse().unwrap(), false));
+    assert!(http::warn_if_exposed("0.0.0.0:8788".parse().unwrap(), false));
+    assert!(http::warn_if_exposed("192.168.1.10:8788".parse().unwrap(), false));
+    // With a token it notes the clear-text transport, but the exposure is guarded.
+    assert!(!http::warn_if_exposed("0.0.0.0:8788".parse().unwrap(), true));
+}
+
+const TOKEN: &str = "s3cret-token-for-the-test";
+
+#[tokio::test]
+async fn with_a_token_rpc_refuses_a_request_that_does_not_carry_it() {
+    let addr = daemon_with(Some(TOKEN)).await;
+    let plan = br#"{"op":"plan"}"#;
+    for (why, extra) in [
+        ("no header", String::new()),
+        ("wrong token", "Authorization: Bearer nope\r\n".to_string()),
+        ("same length, other bytes", format!("Authorization: Bearer {}\r\n", "x".repeat(TOKEN.len()))),
+        ("not a bearer token", format!("Authorization: Basic {TOKEN}\r\n")),
+    ] {
+        let (headers, body) = exchange(addr, "POST", "/rpc", &extra, plan).await;
+        assert!(headers.starts_with("HTTP/1.1 401"), "{why}: {headers}");
+        assert!(headers.to_ascii_lowercase().contains("www-authenticate: bearer"), "{why}: {headers}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "error", "{why}");
+        assert!(v["message"].as_str().unwrap().contains("FRESHET_SERVE_TOKEN"), "{why}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn without_the_token_a_request_is_refused_before_its_body_is_read() {
+    // A request that declares the largest body accepted and sends none of it. Were the
+    // body read before the token was checked, the daemon would wait for 32 MiB that
+    // never come; refused first, the answer is immediate.
+    let addr = daemon_with(Some("s3cret")).await;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n",
+        http::MAX_BODY_BYTES
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut buf = vec![0u8; 64];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("answered without waiting for the body")
+        .unwrap();
+    let status = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(status.starts_with("HTTP/1.1 401"), "{status}");
+}
+
+#[tokio::test]
+async fn with_a_token_rpc_answers_a_request_that_carries_it_and_healthz_stays_open() {
+    let addr = daemon_with(Some(TOKEN)).await;
+    let (headers, body) =
+        exchange(addr, "POST", "/rpc", &format!("Authorization: Bearer {TOKEN}\r\n"), br#"{"op":"plan"}"#).await;
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "plan", "{body}");
+    // A liveness probe has no token to send, and learns only the revision.
+    let (headers, body) = exchange(addr, "GET", "/healthz", "", b"").await;
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    assert!(body.contains(r#""status":"ok""#), "{body}");
 }

@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [features]
 default = []
 # Transports — all OFF by default so the daemon CORE compiles serde-only.
+# `watch`: reload from disk when the project's files change (`freshet-serve --watch`).
 watch = ["dep:notify"]
 # `http` is the shipped transport (M4): an axum router over the same
 # `ProjectCache::handle_json` the in-process lane calls, so the two can never drift.

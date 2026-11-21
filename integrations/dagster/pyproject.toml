@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshet-dagster"
+dynamic = ["version"]
+description = "Run a Freshet state plan as a Dagster job: one op per model, wired from the plan's own edges."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["dagster", "backfill", "freshet", "planner", "lineage", "incremental"]
+# Only freshet-plan, which is standard library only. A Dagster deployment pins
+# dagster and its sibling packages (dagster-webserver, dagster-graphql, the
+# integrations) to one release together; declaring dagster here would invite pip to
+# move it without them. The `dagster` extra is for a fresh environment.
+dependencies = ["freshet-plan>=0.2,<0.3"]
+
+[project.optional-dependencies]
+# The release CI tests on is the floor; older ones are untested, not known broken.
+dagster = ["dagster>=1.13"]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/lucheeseng827/freshet"
+
+[tool.setuptools]
+packages = ["freshet_dagster"]
+
+[tool.setuptools.dynamic]
+version = { attr = "freshet_dagster.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets `pytest` run from this directory against the source tree, freshet-plan's
+# included, without an install.
+pythonpath = [".", "../plan"]

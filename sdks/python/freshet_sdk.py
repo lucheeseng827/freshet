@@ -60,7 +60,7 @@ __all__ = [
     "MILLICU_PER_CU",
     "__version__",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: The planner stores cost as an integer in thousandths of a compute unit, so that
 #: sums and comparisons stay exact and a `view` (50 mCU) is not rounded to zero.
@@ -283,6 +283,10 @@ class Plan:
     queue: Optional[Queue] = None
     #: The snapshot to persist, carried opaquely.
     next_state: Optional[Any] = None
+    #: Planned with no committed state to diff against (contract v6): every model is
+    #: rebuilt because nothing says it was built before. Worth a person's look before
+    #: it runs; commit after it has, and later plans rebuild only what changed.
+    cold: bool = False
 
     def __bool__(self) -> bool:
         """A plan is truthy when it has work in it, so ``if not plan:`` reads right."""
@@ -307,6 +311,7 @@ class Plan:
             cost=CostEstimate.from_wire(cost) if cost is not None else None,
             queue=Queue.from_wire(queue) if queue is not None else None,
             next_state=plan.get("next_state"),
+            cold=bool(plan.get("cold", False)),
         )
 
 

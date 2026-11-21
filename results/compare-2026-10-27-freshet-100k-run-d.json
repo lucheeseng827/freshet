@@ -1,0 +1,502 @@
+[
+  {
+    "spec": {
+      "layers": 80,
+      "width": 128,
+      "cols": 8,
+      "seed": 1364283729
+    },
+    "provenance": {
+      "commit": "eb6bc364bc7e865e0bcdcd7fd068cfa5625336a7",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "criterion": "",
+      "cores": 4,
+      "os": "Linux 6.18.44-fc-v165 x86_64",
+      "dirty": false,
+      "build": "cargo build --release: opt-level = \"z\", lto = true, codegen-units = 1, strip = true",
+      "tools": {
+        "curl": "8.5.0",
+        "freshet": "0.1.0"
+      }
+    },
+    "external": [
+      {
+        "tool": "freshet 0.1.0",
+        "op": "LOAD: graph (parse + column lineage + topo order)",
+        "wall_ms": 617.0,
+        "note": "Reads every .sql file, parses it (sqlparser), derives column-level lineage and prints the models in topological order. Plans nothing. single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row. Compare with dbt parse / sqlmesh info, not with freshet plan.",
+        "command": "freshet graph --project .",
+        "prepare": "",
+        "samples_ms": [
+          617.0,
+          588.0,
+          567.0,
+          723.0,
+          641.0
+        ],
+        "cpu_ms": [
+          600.0,
+          576.0,
+          558.0,
+          714.0,
+          629.0
+        ],
+        "warmup_ms": [
+          599.0
+        ],
+        "other_cpu_ms": [
+          50.0,
+          14.0,
+          12.0,
+          86.0,
+          1.0
+        ],
+        "steal_ms": [
+          20.0,
+          10.0,
+          10.0,
+          10.0,
+          10.0
+        ],
+        "mad_ms": 29.0,
+        "observed": "10240 models in topological order"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "PLAN0: plan vs no prior state (all N)",
+        "wall_ms": 861.0,
+        "note": "No state file, so every model is new: parse + lineage, AST-canonical fingerprint of every model, plan all N with reasons and a CU estimate, print it. Writes nothing (no --commit). single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-absent.json",
+        "prepare": "rm -f ../../freshet-absent.json",
+        "samples_ms": [
+          819.0,
+          974.0,
+          819.0,
+          861.0,
+          1048.0
+        ],
+        "cpu_ms": [
+          815.0,
+          957.0,
+          813.0,
+          853.0,
+          1024.0
+        ],
+        "warmup_ms": [
+          844.0
+        ],
+        "other_cpu_ms": [
+          85.0,
+          353.0,
+          7.0,
+          47.0,
+          6.0
+        ],
+        "steal_ms": [
+          0.0,
+          30.0,
+          10.0,
+          0.0,
+          30.0
+        ],
+        "mad_ms": 42.0,
+        "observed": "10240 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "DIFF: plan vs committed state, nothing changed (0)",
+        "wall_ms": 708.0,
+        "note": "Against the base project's snapshot (committed once by an untimed plan --commit): the same full parse + fingerprint as a cold run (the CLI has no cache), a state diff, and 'nothing to backfill'. A CLI re-plan, not the daemon's warm path (see the freshet-serve row). single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-state.json",
+        "prepare": "",
+        "samples_ms": [
+          738.0,
+          655.0,
+          651.0,
+          708.0,
+          774.0
+        ],
+        "cpu_ms": [
+          704.0,
+          637.0,
+          645.0,
+          702.0,
+          771.0
+        ],
+        "warmup_ms": [
+          666.0
+        ],
+        "other_cpu_ms": [
+          6.0,
+          23.0,
+          15.0,
+          38.0,
+          29.0
+        ],
+        "steal_ms": [
+          30.0,
+          20.0,
+          10.0,
+          0.0,
+          10.0
+        ],
+        "mad_ms": 53.0,
+        "observed": "0 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "DIFF: plan vs committed state, m_0_0 edited (k)",
+        "wall_ms": 750.0,
+        "note": "The edited project against the base project's committed snapshot: full parse + AST fingerprints, diff (only m_0_0 changed), then the column-aware downstream plan with reasons and a CU estimate. single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-state.json",
+        "prepare": "",
+        "samples_ms": [
+          750.0,
+          768.0,
+          882.0,
+          744.0,
+          682.0
+        ],
+        "cpu_ms": [
+          729.0,
+          747.0,
+          857.0,
+          733.0,
+          676.0
+        ],
+        "warmup_ms": [
+          710.0
+        ],
+        "other_cpu_ms": [
+          41.0,
+          513.0,
+          13.0,
+          7.0,
+          24.0
+        ],
+        "steal_ms": [
+          20.0,
+          30.0,
+          20.0,
+          20.0,
+          0.0
+        ],
+        "mad_ms": 18.0,
+        "observed": "80 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0 (freshet-serve daemon)",
+        "op": "WARM: daemon replan, nothing changed (0)",
+        "wall_ms": 362.0,
+        "note": "A whole curl process against a running freshet-serve that parsed the project once at start-up (untimed; the same load the freshet graph row times) and holds it in memory: loopback HTTP + the daemon's plan (AST-canonical re-fingerprint of all N models, which re-parses each one's SQL; diff against the committed in-memory snapshot) + the JSON reply. The CPU column covers the curl process only: the daemon is not its child, so the daemon's own work lands in this row's other-process CPU instead. A long-running daemon is a different architecture from the other tools' per-invocation caches; this is Freshet's warm path, not a like-for-like process.",
+        "command": "curl -sS -X POST http://127.0.0.1:18788/rpc -d '{\"op\":\"plan\"}'",
+        "prepare": "",
+        "samples_ms": [
+          362.0,
+          343.0,
+          415.0,
+          472.0,
+          360.0
+        ],
+        "cpu_ms": [
+          10.0,
+          9.0,
+          8.0,
+          8.0,
+          8.0
+        ],
+        "warmup_ms": [
+          379.0
+        ],
+        "other_cpu_ms": [
+          370.0,
+          351.0,
+          422.0,
+          542.0,
+          342.0
+        ],
+        "steal_ms": [
+          10.0,
+          10.0,
+          50.0,
+          20.0,
+          10.0
+        ],
+        "mad_ms": 19.0,
+        "observed": "0 models in plan"
+      }
+    ],
+    "edit": {
+      "model": "m_0_0",
+      "closure": 80
+    },
+    "skipped": [
+      {
+        "tool": "dbt-core",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      },
+      {
+        "tool": "dbt-oss",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      },
+      {
+        "tool": "sqlmesh",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      }
+    ]
+  },
+  {
+    "spec": {
+      "layers": 625,
+      "width": 160,
+      "cols": 8,
+      "seed": 1364283729
+    },
+    "provenance": {
+      "commit": "eb6bc364bc7e865e0bcdcd7fd068cfa5625336a7",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "criterion": "",
+      "cores": 4,
+      "os": "Linux 6.18.44-fc-v165 x86_64",
+      "dirty": false,
+      "build": "cargo build --release: opt-level = \"z\", lto = true, codegen-units = 1, strip = true",
+      "tools": {
+        "curl": "8.5.0",
+        "freshet": "0.1.0"
+      }
+    },
+    "external": [
+      {
+        "tool": "freshet 0.1.0",
+        "op": "LOAD: graph (parse + column lineage + topo order)",
+        "wall_ms": 6565.0,
+        "note": "Reads every .sql file, parses it (sqlparser), derives column-level lineage and prints the models in topological order. Plans nothing. single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row. Compare with dbt parse / sqlmesh info, not with freshet plan.",
+        "command": "freshet graph --project .",
+        "prepare": "",
+        "samples_ms": [
+          6565.0,
+          7534.0,
+          6529.0,
+          6435.0,
+          7013.0
+        ],
+        "cpu_ms": [
+          6520.0,
+          7467.0,
+          6519.0,
+          6353.0,
+          6932.0
+        ],
+        "warmup_ms": [
+          8452.0
+        ],
+        "other_cpu_ms": [
+          60.0,
+          303.0,
+          151.0,
+          87.0,
+          18.0
+        ],
+        "steal_ms": [
+          100.0,
+          80.0,
+          10.0,
+          100.0,
+          90.0
+        ],
+        "mad_ms": 130.0,
+        "observed": "100000 models in topological order"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "PLAN0: plan vs no prior state (all N)",
+        "wall_ms": 10924.0,
+        "note": "No state file, so every model is new: parse + lineage, AST-canonical fingerprint of every model, plan all N with reasons and a CU estimate, print it. Writes nothing (no --commit). single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-absent.json",
+        "prepare": "rm -f ../../freshet-absent.json",
+        "samples_ms": [
+          10924.0,
+          10581.0,
+          10429.0,
+          11273.0,
+          11238.0
+        ],
+        "cpu_ms": [
+          10787.0,
+          10463.0,
+          10370.0,
+          11099.0,
+          11119.0
+        ],
+        "warmup_ms": [
+          11341.0
+        ],
+        "other_cpu_ms": [
+          203.0,
+          87.0,
+          40.0,
+          71.0,
+          71.0
+        ],
+        "steal_ms": [
+          150.0,
+          120.0,
+          80.0,
+          190.0,
+          130.0
+        ],
+        "mad_ms": 343.0,
+        "observed": "100000 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "DIFF: plan vs committed state, nothing changed (0)",
+        "wall_ms": 7749.0,
+        "note": "Against the base project's snapshot (committed once by an untimed plan --commit): the same full parse + fingerprint as a cold run (the CLI has no cache), a state diff, and 'nothing to backfill'. A CLI re-plan, not the daemon's warm path (see the freshet-serve row). single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-state.json",
+        "prepare": "",
+        "samples_ms": [
+          8046.0,
+          7713.0,
+          7109.0,
+          7749.0,
+          8080.0
+        ],
+        "cpu_ms": [
+          7963.0,
+          7659.0,
+          7018.0,
+          7671.0,
+          8012.0
+        ],
+        "warmup_ms": [
+          7750.0
+        ],
+        "other_cpu_ms": [
+          77.0,
+          21.0,
+          32.0,
+          89.0,
+          58.0
+        ],
+        "steal_ms": [
+          110.0,
+          80.0,
+          100.0,
+          80.0,
+          80.0
+        ],
+        "mad_ms": 297.0,
+        "observed": "0 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0",
+        "op": "DIFF: plan vs committed state, m_0_0 edited (k)",
+        "wall_ms": 8588.0,
+        "note": "The edited project against the base project's committed snapshot: full parse + AST fingerprints, diff (only m_0_0 changed), then the column-aware downstream plan with reasons and a CU estimate. single-threaded; Freshet keeps no parse cache, so every CLI run is cold and there is no separate warm CLI row.",
+        "command": "freshet plan --project . --state ../../freshet-state.json",
+        "prepare": "",
+        "samples_ms": [
+          8588.0,
+          8054.0,
+          8460.0,
+          8860.0,
+          8653.0
+        ],
+        "cpu_ms": [
+          8400.0,
+          7986.0,
+          8408.0,
+          8778.0,
+          8518.0
+        ],
+        "warmup_ms": [
+          8923.0
+        ],
+        "other_cpu_ms": [
+          -20.0,
+          74.0,
+          152.0,
+          32.0,
+          42.0
+        ],
+        "steal_ms": [
+          260.0,
+          90.0,
+          60.0,
+          100.0,
+          150.0
+        ],
+        "mad_ms": 128.0,
+        "observed": "3114 models in plan"
+      },
+      {
+        "tool": "freshet 0.1.0 (freshet-serve daemon)",
+        "op": "WARM: daemon replan, nothing changed (0)",
+        "wall_ms": 3548.0,
+        "note": "A whole curl process against a running freshet-serve that parsed the project once at start-up (untimed; the same load the freshet graph row times) and holds it in memory: loopback HTTP + the daemon's plan (AST-canonical re-fingerprint of all N models, which re-parses each one's SQL; diff against the committed in-memory snapshot) + the JSON reply. The CPU column covers the curl process only: the daemon is not its child, so the daemon's own work lands in this row's other-process CPU instead. A long-running daemon is a different architecture from the other tools' per-invocation caches; this is Freshet's warm path, not a like-for-like process.",
+        "command": "curl -sS -X POST http://127.0.0.1:18788/rpc -d '{\"op\":\"plan\"}'",
+        "prepare": "",
+        "samples_ms": [
+          3436.0,
+          3723.0,
+          3548.0,
+          3375.0,
+          3561.0
+        ],
+        "cpu_ms": [
+          8.0,
+          9.0,
+          8.0,
+          9.0,
+          8.0
+        ],
+        "warmup_ms": [
+          3508.0
+        ],
+        "other_cpu_ms": [
+          3482.0,
+          3721.0,
+          3492.0,
+          3341.0,
+          3562.0
+        ],
+        "steal_ms": [
+          40.0,
+          40.0,
+          60.0,
+          70.0,
+          30.0
+        ],
+        "mad_ms": 112.0,
+        "observed": "0 models in plan"
+      }
+    ],
+    "edit": {
+      "model": "m_0_0",
+      "closure": 3114
+    },
+    "skipped": [
+      {
+        "tool": "dbt-core",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      },
+      {
+        "tool": "dbt-oss",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      },
+      {
+        "tool": "sqlmesh",
+        "op": "all operations",
+        "reason": "not selected (--only freshet)"
+      }
+    ]
+  }
+]

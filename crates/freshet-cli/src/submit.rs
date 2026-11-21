@@ -65,6 +65,14 @@ pub struct Envelope {
     /// and `{}` would instead fail as a malformed object before it got the chance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
+    /// With hosted state, the version the plan was computed against (`null` before
+    /// the first commit); absent for a state file, which has no versions.
+    ///
+    /// A consumer that holds plans for review needs it: without it, a plan computed
+    /// against an older snapshot would be taken as planned against the current one,
+    /// and could be approved against state it never saw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<Option<i64>>,
 }
 
 /// Every model's upstreams, in name order.

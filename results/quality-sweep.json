@@ -1,0 +1,173 @@
+{
+  "topology": {
+    "layers": 16,
+    "width": 64,
+    "cols": 8,
+    "seed": 1364283729
+  },
+  "edits_per_point": 8,
+  "points": [
+    {
+      "fan_in": 1,
+      "reads": 1,
+      "edit": "key",
+      "closure": 48,
+      "truth": 38,
+      "planned": 38,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 1,
+      "edit": "value",
+      "closure": 48,
+      "truth": 8,
+      "planned": 8,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 2,
+      "edit": "key",
+      "closure": 128,
+      "truth": 23,
+      "planned": 23,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 2,
+      "edit": "value",
+      "closure": 128,
+      "truth": 23,
+      "planned": 23,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 4,
+      "edit": "key",
+      "closure": 128,
+      "truth": 22,
+      "planned": 22,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 4,
+      "edit": "value",
+      "closure": 128,
+      "truth": 30,
+      "planned": 30,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 8,
+      "edit": "key",
+      "closure": 128,
+      "truth": 128,
+      "planned": 128,
+      "missed": 0
+    },
+    {
+      "fan_in": 1,
+      "reads": 8,
+      "edit": "value",
+      "closure": 128,
+      "truth": 128,
+      "planned": 128,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 1,
+      "edit": "key",
+      "closure": 3916,
+      "truth": 3916,
+      "planned": 3916,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 1,
+      "edit": "value",
+      "closure": 3916,
+      "truth": 8,
+      "planned": 8,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 2,
+      "edit": "key",
+      "closure": 3266,
+      "truth": 3266,
+      "planned": 3266,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 2,
+      "edit": "value",
+      "closure": 3266,
+      "truth": 1196,
+      "planned": 1196,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 4,
+      "edit": "key",
+      "closure": 3321,
+      "truth": 3321,
+      "planned": 3321,
+      "missed": 0
+    },
+    {
+      "fan_in": 2,
+      "reads": 4,
+      "edit": "value",
+      "closure": 3321,
+      "truth": 763,
+      "planned": 763,
+      "missed": 0
+    },
+    {
+      "fan_in": 4,
+      "reads": 1,
+      "edit": "key",
+      "closure": 6494,
+      "truth": 6494,
+      "planned": 6494,
+      "missed": 0
+    },
+    {
+      "fan_in": 4,
+      "reads": 1,
+      "edit": "value",
+      "closure": 6494,
+      "truth": 844,
+      "planned": 844,
+      "missed": 0
+    },
+    {
+      "fan_in": 4,
+      "reads": 2,
+      "edit": "key",
+      "closure": 5593,
+      "truth": 5593,
+      "planned": 5593,
+      "missed": 0
+    },
+    {
+      "fan_in": 4,
+      "reads": 2,
+      "edit": "value",
+      "closure": 5593,
+      "truth": 1578,
+      "planned": 1578,
+      "missed": 0
+    }
+  ]
+}

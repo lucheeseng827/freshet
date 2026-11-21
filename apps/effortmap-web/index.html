@@ -37,6 +37,7 @@
   </p>
   <div class="row">
     <button id="pick-dir" hidden>Choose a folder…</button>
+    <button id="reread" hidden title="Read the same folder again, then plan">Re-read the folder</button>
     <label class="filebtn" id="pick-files-label">
       Choose a folder…
       <input type="file" id="pick-files" webkitdirectory directory multiple>
@@ -44,6 +45,12 @@
     <button id="load-example">Load the example project</button>
     <span id="project-status" style="color:var(--ink-muted);font-size:13px"></span>
   </div>
+  <p class="hint" id="folder-note" hidden style="margin-top:10px">
+    This browser reads a folder once per pick: after editing a model, choose the folder
+    again to plan the edit, and nothing is ever written back to it. Re-reading a folder
+    with one click needs a Chromium browser (Chrome, Edge), the only ones with the File
+    System Access API. Planning is the same in every browser.
+  </p>
 
   <details id="advanced">
     <summary>Sources and materializations</summary>
@@ -70,6 +77,14 @@
     <p class="hint">
       A <code>sources.json</code> or <code>materializations.json</code> in the folder is
       picked up automatically.
+    </p>
+    <fieldset>
+      <label><input type="checkbox" id="strict-refs"> Refuse tables that are neither models nor sources</label>
+    </fieldset>
+    <p class="hint" style="margin-top:6px">
+      Otherwise such a table is planned as external, so a misspelled model
+      (<code>from stgg</code> for <code>stg</code>) loses its edge and runs beside the
+      model it reads. <code>"raw": []</code> declares a table without its columns.
     </p>
   </details>
 </section>

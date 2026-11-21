@@ -40,8 +40,12 @@ ureq = { version = "3", optional = true }
 [features]
 default = ["submit", "hosted"]
 submit = ["dep:ureq"]
-# `--state` may name a hosted state API (dagron Cloud's `/state/v1`) instead of a file.
+# `--state` may name a hosted state API (`freshet-state-server`'s `/v1/<name>`) instead of a file.
 hosted = ["dep:ureq"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Hosted state end to end (`tests/state_server.rs`): the server a team runs, started
+# in the test process, and the runtime it serves on.
+freshet-state-server = { path = "../freshet-state-server" }
+tokio = { version = "1", features = ["rt", "net"] }

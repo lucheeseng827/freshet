@@ -3,8 +3,7 @@
 Point Freshet at an existing dbt project and get a number about *your* project: of the
 models your last run built, how many did this change actually need? It reads the
 artifacts dbt already wrote — nothing is installed into the project, dbt is never run,
-and no warehouse is touched. This is the adoption wedge from
-the planner core's product roadmap (Phase 1), shipped as `freshet explain`.
+and no warehouse is touched. It ships as `freshet explain`.
 
 ```sh
 freshet explain --against ./jaffle_shop                          # graph facts only

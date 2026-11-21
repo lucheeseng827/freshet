@@ -10,12 +10,12 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 keywords = ["airflow", "backfill", "freshet", "planner", "dag", "lineage", "incremental"]
-# None, on purpose. The plan half is standard library only, and the Airflow half
-# runs inside an Airflow deployment that already pinned Airflow and its providers
-# with a constraints file. Declaring apache-airflow here would invite pip to
-# re-resolve the scheduler's own install; the `airflow` extra is for a fresh
-# environment, not for a production one.
-dependencies = []
+# Only freshet-plan, which is standard library only. The Airflow half runs inside an
+# Airflow deployment that already pinned Airflow and its providers with a
+# constraints file. Declaring apache-airflow here would invite pip to re-resolve the
+# scheduler's own install; the `airflow` extra is for a fresh environment, not for a
+# production one.
+dependencies = ["freshet-plan>=0.2,<0.3"]
 
 [project.optional-dependencies]
 airflow = [
@@ -39,5 +39,6 @@ version = { attr = "freshet_airflow.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Lets `pytest` run from this directory against the source tree, without an install.
-pythonpath = ["."]
+# Lets `pytest` run from this directory against the source tree, freshet-plan's
+# included, without an install.
+pythonpath = [".", "../plan"]

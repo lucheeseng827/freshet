@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { initSync, plan } from "../assets/freshet_wasm.js";
 import { summary, queueRows } from "../assets/effortmap.js";
+import { parseExact, stringifyExact } from "../assets/json.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 
@@ -47,7 +48,7 @@ test("planning is deterministic across calls", () => {
 });
 
 test("the golden plan is the shape the page renders", () => {
-  const p = JSON.parse(plan(REQUEST));
+  const p = parseExact(plan(REQUEST)); // as the page parses it
   const s = summary(p);
   assert.equal(s.models, 3);
   assert.equal(s.totalCu, 3);
@@ -66,6 +67,24 @@ test("a restatement fans out to one item per partition", () => {
   // but not into `customer_ltv`, which is a table and rebuilds whole.
   assert.equal(queueRows(p).filter((r) => r.model === "daily_revenue").length, 3);
   assert.equal(queueRows(p).filter((r) => r.model === "customer_ltv").length, 1);
+});
+
+test("a misspelled model is refused only when strict_refs asks", () => {
+  // SHORTFALLS.md §6: `stgg` for `stg` was an external table, so `mart` lost its edge.
+  const req = {
+    sources: { raw: ["a"] },
+    models: [
+      { name: "stg", sql: "select a from raw" },
+      { name: "mart", sql: "select a from stgg" },
+    ],
+  };
+  const lenient = JSON.parse(plan(JSON.stringify(req)));
+  assert.deepEqual(lenient.models.find((m) => m.name === "mart").depends_on, []);
+
+  const strict = JSON.parse(plan(JSON.stringify({ ...req, strict_refs: true })));
+  assert.equal(strict.error.code, "undeclared_table");
+  assert.match(strict.error.message, /model `mart` reads `stgg`.*did you mean `stg`\?/);
+  assert.deepEqual(strict.models, []);
 });
 
 test("a malformed request is an error document, not a throw", () => {
@@ -87,6 +106,28 @@ test("cost and queue stay absent unless asked for", () => {
 
 // ── the u64 fingerprint round-trip ────────────────────────────────────────────
 
+test("the page reads every number in a response exactly", () => {
+  // Parsed and written back, a response comes out byte for byte: no value in it — the
+  // fingerprints today, whatever u64 the contract adds tomorrow — changed on its way
+  // through the page. (Should a float ever reach the wire, serde writes `1.0` where
+  // JavaScript writes `1`, and this fails over a difference that loses nothing.)
+  const base = JSON.parse(REQUEST);
+  const requests = [
+    REQUEST,
+    JSON.stringify({ ...base, restate: { model: "stg_orders", partitions: ["d1", "d2"] } }),
+    JSON.stringify({ ...base, include_cost: false, include_queue: false }),
+    JSON.stringify({ ...base, models: [...base.models, { name: "m", sql: "select a from stgg" }], strict_refs: true }),
+  ];
+  for (const request of requests) {
+    const raw = plan(request);
+    assert.equal(stringifyExact(parseExact(raw)), raw, request);
+  }
+
+  const exact = parseExact(GOLDEN).next_state.fingerprints.stg_orders;
+  assert.equal(exact, 16899773155021735464n);
+  assert.notEqual(BigInt(JSON.parse(GOLDEN).next_state.fingerprints.stg_orders), exact, "JSON.parse rounds it");
+});
+
 test("a fingerprint survives a round-trip through the page exactly", async () => {
   const { plan: runPlan, rawField, withRawField } = await import("../assets/planner.js");
   const request = JSON.parse(REQUEST);
@@ -99,6 +140,12 @@ test("a fingerprint survives a round-trip through the page exactly", async () =>
   const exact = first.responseText.match(/"stg_orders":(\d+)/)[1];
   assert.ok(BigInt(exact) > BigInt(Number.MAX_SAFE_INTEGER), "the fixture exercises the unsafe range");
   assert.ok(first.nextStateRaw.includes(exact), "the stored state keeps the exact digits");
+  assert.equal(first.plan.next_state.fingerprints.stg_orders, BigInt(exact), "and so does the parsed plan");
+
+  // The plan.json the page offers for download carries them too.
+  const download = stringifyExact(first.plan, 2);
+  assert.ok(download.includes(`"stg_orders": ${exact}`), download);
+  assert.deepEqual(parseExact(download), first.plan);
 
   // Feed it back: nothing changed, so nothing should replan. This is the assertion
   // that fails loudly if state is ever routed through a JS number — a corrupted

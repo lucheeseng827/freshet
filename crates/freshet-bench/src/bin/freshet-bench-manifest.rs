@@ -4,7 +4,12 @@
 //! ```text
 //! freshet-bench-manifest RUN_DIR [RUN_DIR ...] > compare.json
 //! freshet-bench-manifest --table compare.json      # Markdown tables, for humans
+//! freshet-bench-manifest --gate compare.json [--budget-ms N] [--budget-models N] [--max-scaling X]
 //! ```
+//!
+//! `--gate` holds a written manifest to the weekly gate's rules ([`freshet_bench::gate`]):
+//! one line per check, exit 1 if any failed or the runs cannot be judged. The
+//! defaults are the published budget.
 //!
 //! Prints a JSON array with one `BenchManifest` per `RUN_DIR` (one per project size).
 //! `--table` renders a written manifest as Markdown, so a table quoted in a doc or a
@@ -40,7 +45,8 @@ use freshet_bench::export::ExportSummary;
 use freshet_bench::{BenchManifest, ExternalDatum, Provenance, SkippedDatum};
 
 const USAGE: &str = "usage: freshet-bench-manifest RUN_DIR [RUN_DIR ...] > compare.json\n       \
-                     freshet-bench-manifest --table compare.json";
+                     freshet-bench-manifest --table compare.json\n       \
+                     freshet-bench-manifest --gate compare.json [--budget-ms N] [--budget-models N] [--max-scaling X]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,6 +61,15 @@ fn main() -> ExitCode {
                 print!("{}", table(&runs));
             }
             [flag, ..] if flag == "--table" => bail!("--table takes exactly one manifest file\n{USAGE}"),
+            [flag, file, rest @ ..] if flag == "--gate" => {
+                let runs: Vec<BenchManifest> = read_json(Path::new(file))?;
+                let findings = freshet_bench::gate::check(&runs, &gate_rules(rest)?)?;
+                for f in &findings {
+                    println!("{f}");
+                }
+                let failed = findings.iter().filter(|f| !f.ok).count();
+                ensure!(failed == 0, "{failed} of {} checks failed", findings.len());
+            }
             dirs => {
                 let manifests = dirs.iter().map(|d| manifest(Path::new(d))).collect::<Result<Vec<_>>>()?;
                 println!("{}", serde_json::to_string_pretty(&manifests)?);
@@ -71,16 +86,31 @@ fn main() -> ExitCode {
     }
 }
 
+/// `--budget-ms N --budget-models N --max-scaling X`, any subset, over the published rules.
+fn gate_rules(args: &[String]) -> Result<freshet_bench::gate::Rules> {
+    let mut rules = freshet_bench::gate::Rules::PUBLISHED;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it.next().with_context(|| format!("{flag} needs a value\n{USAGE}"))?;
+        match flag.as_str() {
+            "--budget-ms" => rules.budget_ms = value.parse().with_context(|| format!("{flag} {value}"))?,
+            "--budget-models" => rules.budget_models = value.parse().with_context(|| format!("{flag} {value}"))?,
+            "--max-scaling" => rules.max_scaling = value.parse().with_context(|| format!("{flag} {value}"))?,
+            _ => bail!("unknown --gate option {flag}\n{USAGE}"),
+        }
+    }
+    Ok(rules)
+}
+
 fn manifest(dir: &Path) -> Result<BenchManifest> {
     let base: ExportSummary = read_json(&dir.join("export.json"))?;
     let edit = match optional(&dir.join("export-edit.json"))? {
         Some(raw) => {
             let edited: ExportSummary = serde_json::from_str(&raw).context("parsing export-edit.json")?;
+            // The whole spec, density included: an edit timed on a project wired
+            // differently is a timing of a different project.
             ensure!(
-                edited.spec.layers == base.spec.layers
-                    && edited.spec.width == base.spec.width
-                    && edited.spec.cols == base.spec.cols
-                    && edited.spec.seed == base.spec.seed,
+                edited.spec == base.spec,
                 "export-edit.json was generated from a different spec than export.json"
             );
             edited.edit
@@ -402,7 +432,7 @@ mod tests {
                        b\tsample\t5.000\t4.500\t0.500\t500\t50\n\
                        b\tsample\t7.000\t6.500\t0.500\t14000\t0\n";
         let run = BenchManifest {
-            spec: freshet_bench::GenSpec { layers: 2, width: 3, cols: 1, seed: 0x51 },
+            spec: freshet_bench::GenSpec { layers: 2, width: 3, cols: 1, seed: 0x51, ..Default::default() },
             provenance: provenance("commit\t0123456789abcdef\nrustc\tr\ncpu\tXeon\ncores\t4\nos\tLinux\n").unwrap(),
             external: data(OPS, samples, "").unwrap(),
             edit: Some(freshet_bench::EditSpec { model: "m_0_0".into(), closure: 2 }),

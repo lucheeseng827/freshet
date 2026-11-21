@@ -71,7 +71,7 @@ class ErrorTest(unittest.TestCase):
 
 class SurfaceTest(unittest.TestCase):
     def test_the_contract_version_is_exposed(self):
-        self.assertEqual(freshet_planner.WIRE_CONTRACT_VERSION, "planner-embed/5")
+        self.assertEqual(freshet_planner.WIRE_CONTRACT_VERSION, "planner-embed/6")
 
     def test_a_plan_can_carry_rendered_sql(self):
         response = freshet_planner.plan_dict(

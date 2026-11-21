@@ -40,11 +40,36 @@ added anywhere in the wire will arrive with the same trap armed and no test watc
 for it. The structural fix is serializing large integers as strings in the contract,
 which is a change to `freshet-state` and would break existing `state.json` files.
 
+*Now fixed structurally, without that contract change (2026-10-27).* The page no
+longer calls `JSON.parse` on anything the planner wrote. `parseExact` (`json.js`) is
+`JSON.parse` except that an integer literal past 2^53 becomes an exact `BigInt`; a
+fraction or an exponent stays a number, because it is an f64 on the Rust side and a
+double loses nothing of it. `stringifyExact` writes a `BigInt` back as its digits,
+for requests, the `plan.json` download and the queue's NDJSON. A new u64 therefore
+arrives exact, and arithmetic that forgets it is a `BigInt` throws instead of
+rounding: exact or loud, never quietly wrong. The tests hold it both ways. On
+documents without a large integer the two functions are the built-ins byte for byte,
+refusals included. Every response the tests produce parses and writes back to its
+own bytes. The parse costs 9 ms against `JSON.parse`'s 4 ms on the 2,001-model plan
+above (494 KB). State is still carried as text as well: it is the one field already
+known to need it, and text cannot be wrong. Changing the contract was rejected. It
+would have broken every committed `state.json` and every other binding to fix one
+caller.
+
 **2. Directory access is uneven and cannot be evened out.** `showDirectoryPicker()`
 keeps a re-readable handle but is Chromium-only. Firefox and Safari get a
 `webkitdirectory` input: it works, but the folder must be re-picked every session and
 nothing can be written back. Against `freshet-serve --project ./models` this is the
 real regression, and it is a platform gap, not something to engineer around.
+
+*Now labelled, and the handle used (2026-10-27).* On the `webkitdirectory` path the
+page says beside the button that a folder is read once per pick, that nothing is
+written back, and that one-click re-reading needs a Chromium browser. Where the
+browser gives a handle, the page keeps it: *Re-read the folder* reads the same folder
+again and plans it, which is the edit loop. Neither survives a reload. A handle could
+be kept in IndexedDB, but Chromium asks for permission again on each visit, so that
+buys one dialog for another. Against `freshet-serve --project ./models --watch`, which
+replans as files change, the gap stays real: no browser can watch a folder.
 
 **3. State is per-browser.** `localStorage` is not shared, so two engineers looking at
 the same repository get two different answers about what has been built. Exporting
@@ -87,13 +112,26 @@ The fix is a strictness setting: an unknown table is only external if it is decl
 that legitimately read undeclared tables, so it wants to be a flag — and the flag wants
 to be on in CI.
 
+*Now fixed that way.* `strict_refs` on the request (`--strict-refs` on the CLI, the
+checkbox under *Sources and materializations* here) refuses every table that is neither
+a model nor a declared source, with the closest names, as `undeclared_table`:
+``model `mart` reads `stgg`, which is neither a model nor a declared source: did you
+mean `stg`?``. `"raw": []` declares a table without listing its columns. Off, the CLI
+still warns on stderr about a table one edit from a model or source. The page cannot:
+the wire has no channel for a warning, and adding one is a contract change, so here the
+checkbox is the only way to hear about it.
+
 **7. Cost is a rate card, not a measurement.** One CU is *defined* as one full rebuild
 of one `table` model. Two `table` models therefore always cost exactly 2.00 CU whether
 one has a thousand rows and the other a billion. The number ranks a plan against
 another plan of the same project; it does not predict a bill or a duration, and every
 surface here says so. Making it predictive means feeding real execution telemetry back
-into `CostModel`, which needs a runner reporting outcomes — nothing in this repository
-does that yet.
+into `CostModel`, which needs a runner reporting outcomes.
+
+*The CLI now takes that feedback.* `freshet cost record` keeps what a team's runs cost
+in `costs.json`, in its own unit, and `plan` then prices the plan from it, saying how
+much of the figure was measured. This page does not read `costs.json` yet, and the wire
+response does not carry the measured estimate, so here cost is still the rate card.
 
 **8. The planner has no data.** It reads SQL text and computes lineage. It never
 connects to a warehouse, never sees a row, and cannot show anyone their data. Anything

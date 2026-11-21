@@ -21,6 +21,7 @@ use std::fmt::Write as _;
 
 use freshet_core::{Model, Project};
 use freshet_embed::build_project_with_hints;
+use freshet_fingerprint::AstFingerprinter;
 use freshet_incremental::IncrementalConfig;
 use freshet_sql::Catalog;
 use serde_json::json;
@@ -93,6 +94,27 @@ fn check(
             assert_eq!(dump(&project(cache)), want, "incremental project != full rebuild\n{}", context());
             assert_eq!(count, full.len(), "{}", context());
 
+            // The plan fingerprints from the daemon's cache of SQL halves; it must be
+            // exactly what fingerprinting the full build from scratch gives. The case
+            // the cache could get wrong is the one that keeps a model's SQL and moves
+            // its columns or dependencies, so the run counts it.
+            assert_eq!(
+                planned_fingerprints(cache),
+                AstFingerprinter::new().fingerprint_project(&full),
+                "cached fingerprints != from scratch\n{}",
+                context()
+            );
+            tally.same_sql_new_shape += full
+                .names()
+                .filter(|name| {
+                    let (now, then) = (full.get(name).unwrap(), accepted.project.get(name));
+                    then.is_some_and(|then| {
+                        then.sql == now.sql
+                            && (column_names(then) != column_names(now) || then.depends_on != now.depends_on)
+                    })
+                })
+                .count();
+
             // The revision moves exactly when what plans read moved.
             let changed = want != accepted.dump || world.incremental != accepted.incremental;
             assert_eq!(revision, before + u64::from(changed), "revision\n{}", context());
@@ -124,6 +146,12 @@ fn check(
             assert_eq!(cache.revision(), before, "a failed reload keeps the revision\n{}", context());
             let kept = dump(&project(cache));
             assert_eq!(kept, accepted.dump, "a failed reload keeps the project\n{}", context());
+            assert_eq!(
+                planned_fingerprints(cache),
+                AstFingerprinter::new().fingerprint_project(&accepted.project),
+                "cached fingerprints after a failed reload\n{}",
+                context()
+            );
             tally.rejected += 1;
             false
         }
@@ -158,6 +186,20 @@ fn dump(project: &Project) -> String {
 
 fn project(cache: &ProjectCache) -> std::sync::Arc<Project> {
     cache.inner.read().unwrap().project.clone()
+}
+
+/// The fingerprints a `plan` staged: what its commit would write.
+fn planned_fingerprints(cache: &ProjectCache) -> BTreeMap<String, u64> {
+    let Response::Plan { token: Some(token), .. } =
+        cache.handle(Request::Plan { include_cost: false, include_queue: false })
+    else {
+        panic!("a plan always stages its snapshot under a token");
+    };
+    cache.inner.read().unwrap().staged[&token].snapshot.fingerprints.clone()
+}
+
+fn column_names(m: &Model) -> Vec<&str> {
+    m.columns.iter().map(|c| c.name.as_str()).collect()
 }
 
 /// The last reload the daemon accepted: what a revision bump is measured against, and
@@ -208,6 +250,9 @@ struct Tally {
     rejected: usize,
     /// Projects with at least one successful reload.
     projects_loaded: usize,
+    /// Models a reload kept the SQL of while their columns or dependencies moved: the
+    /// fingerprints a cache of SQL halves would get wrong if it cached the rest too.
+    same_sql_new_shape: usize,
 }
 
 impl Tally {
@@ -218,6 +263,7 @@ impl Tally {
         assert!(self.through_closure >= 100, "too few edits reached a downstream model: {self:#?}");
         assert!(self.untouched >= 50, "too few reloads without an SQL edit: {self:#?}");
         assert!(self.rejected >= 20, "too few rejected reloads: {self:#?}");
+        assert!(self.same_sql_new_shape >= 50, "too few models kept their SQL and moved their shape: {self:#?}");
         let reason = |needle: &str| -> usize {
             self.full.iter().filter(|(r, _)| r.contains(needle)).map(|(_, n)| n).sum()
         };

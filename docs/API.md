@@ -97,7 +97,9 @@ plan), `restate?: {model, partitions}` (plan a data restatement instead of a
 code-change plan), `incremental?` (the `incremental.json` document: grains,
 edge windows, replace declarations), `render?: {dialect, schema?, recreate?}`
 (attach SQL — contract v4), `include_cost?` / `include_queue?` (the effort map and
-the executable queue), `budget_millicu?` (a processing cap).
+the executable queue), `budget_millicu?` (a processing cap), `strict_refs?` (refuse a
+table that is neither a model nor one of `sources`, instead of planning it as an
+external table; `[]` in `sources` declares a table without its columns).
 
 **Response** (`PlanResponse`): `models: [{name, reason, unit, depends_on}]` in
 topological order; `next_state` (the snapshot to persist **after** a successful run —
@@ -105,8 +107,10 @@ stateless callers store it and pass it back as `prior_state` next time; absent
 for restatements); `error?: {code, message}` with codes `bad_request`
 (unparseable request), `plan_error` (planning failed, e.g. unknown
 materialization or model), `render_error` (`render` asked for SQL the renderer
-refused, or an unknown dialect), `serialize_error`, and — from the C ABI only —
-`ffi_error`. `reason` is `"directly_changed"` or
+refused, or an unknown dialect), `undeclared_table` (`strict_refs` refused a table,
+named with the models and sources one edit from it — ``model `mart` reads `stgg`, which
+is neither a model nor a declared source: did you mean `stg`?``; only ever returned when
+asked for), `serialize_error`, and — from the C ABI only — `ffi_error`. `reason` is `"directly_changed"` or
 `{"downstream":{"because_of","via_columns"}}`; `unit` is `"full_model"` or
 `{"partitions":[…]}`.
 
@@ -142,8 +146,18 @@ second consumer may wrap the same `PlanResponse` differently, which is the point
 freezing the payload rather than the request. The `plan` `submit` posts carries its
 effort map (`cost`, as `include_cost` would ask for): the plan's own CU estimate at
 the default rate card, which a consumer that runs plans on compute it supplies may
-meter (dagron Cloud does, for a workspace in hosted compute mode). A consumer that
-does not mirror `cost` ignores it — `dagron-state` does.
+meter. A consumer that does not mirror `cost` ignores it — `dagron-state` does.
+Against hosted state (`--state https://…`, §2a) the envelope also carries
+`expected_version`: the hosted version the plan was computed against (`null` before
+the first commit), so a consumer that holds plans for review can refuse one planned
+against state that has since moved. A state file has no versions, and the key is
+left out.
+
+`next_state` is left out of the CLI's plans unless asked for: `freshet plan --json
+--with-next-state` and `freshet submit --with-next-state` carry it, the exact snapshot
+`plan --commit` writes once the plan has run (never for a plan over its `--budget`).
+It is for a consumer that reviews plans before they run and holds the commit it later
+receives to the plan it approved: the same snapshot, against the same version.
 
 ### Contract v3 — `replace`
 
@@ -224,32 +238,67 @@ rebuilt whole. `unpruned_millicu - total_millicu`, floored at zero, is the rebui
 work the plan avoids — Freshet's north-star metric. `freshet plan` prints it as its
 last line; the Python SDK exposes it as `CostEstimate.avoided_millicu`.
 
-`freshet_embed::WIRE_CONTRACT_VERSION` names the revision (`"planner-embed/5"`); the
+### Contract v6 — `cold`
+
+`"cold": true` on a code-change plan made with no committed state to diff against:
+no `prior_state`, a state file or hosted state with no commits yet, or a snapshot
+with no fingerprints. Nothing says any model was built before, so every model is
+`directly_changed` and the plan rebuilds the project rather than a change to it.
+Only the planner knows this — from outside, a cold plan and a change that really
+touched every model look the same — so it says so, and a consumer that gates
+rebuilds can hold a cold plan for a person by name rather than by its size
+(dagron-state's `auto_approve` does).
+
+The key is written only when true, so a warm plan's JSON is byte-for-byte what it was
+under v5. A restatement reads no state and is never cold. A fingerprint-scheme
+upgrade is not cold either: the CLI re-keys the models it finds unchanged instead of
+rebuilding them. `freshet plan`, `freshet submit`, `freshet-serve` and every binding
+over `freshet_embed::plan` set it; `freshet plan` without `--json` prints a line
+saying the plan is cold and why.
+
+`freshet_embed::WIRE_CONTRACT_VERSION` names the revision (`"planner-embed/6"`); the
 C ABI (`planner_contract_version()`), the wheel (`freshet_planner.WIRE_CONTRACT_VERSION`),
 dagron-state and freshet-airflow all stamp the same string.
 
 ## 2a. Hosted state — what `freshet --state https://…` speaks
 
 The CLI's second socket (after `submit`): state kept by a server instead of a file,
-versioned, and committed by compare-and-swap. dagron Cloud serves it at
-`https://<edge>/state/v1`; any
-server implementing these two calls works. `<url>` is what `--state` names, in full,
-and every call carries `Authorization: Bearer $FRESHET_STATE_TOKEN`.
+versioned, and committed by compare-and-swap. `freshet-state-server` serves it at
+`https://<host>/v1/<name>`, one state per name; any server implementing these calls
+works. `<url>` is what `--state` names, in full, and every call carries
+`Authorization: Bearer $FRESHET_STATE_TOKEN`.
 
 | Call | Request | Success | Other answers freshet reads |
 |---|---|---|---|
 | `GET <url>/current` | — | `200 {"version": int\|null, "snapshot": StateSnapshot}` | any non-`200`: an error carrying the server's `error` text |
 | `POST <url>/commit` | `{"expected_version": int\|null, "snapshot": StateSnapshot, "summary": {...}}` | `200 {"version": N}` | `409 {"error", "expected", "found"}` → exit **3**; anything else → exit 1 |
+| `GET <url>/history?limit=N[&before=V]` | — | `200 {"commits": [{"version", "committed_at", "summary"}], "limit": N, "next_before": V\|null}` | any non-`200`: an error carrying the server's `error` text |
 
 `StateSnapshot` is the exact document a state file holds —
 `{"fingerprints": {model: u64}, "watermarks": {model: string}}` — so nothing is
 converted on the way: `version` is the server's commit counter (`null` until the
 first commit), and `expected_version` is the version the plan being committed was
 computed against. A reply whose snapshot carries a field this freshet cannot keep is
-refused rather than planned against. dagron Cloud also serves
-`GET <url>/history?limit=&snapshots=` (newest-first commit log, server-computed
-summaries); freshet does not call it. Flags, exit codes and the lossless-mapping
-details: [CONFIG.md](./CONFIG.md#state-a-file-or-hosted-state).
+refused rather than planned against, and `freshet-state-server` refuses a commit
+whose snapshot it could not store whole (422).
+
+History is newest first. Each commit's `summary` is the server's own diff against
+the commit before (`changed`: models whose fingerprint is new or different,
+`removed`, `watermarks_changed`: models whose ledger moved) with the committer's
+`summary` under `context`. `next_before` is the `before` for the next page, `null`
+when the server keeps nothing older; a server that omits it does not page, and
+`freshet history --before` refuses it. `freshet-state-server` caps a page at 100.
+
+`freshet-state-server` answers two more reads, for its console (`apps/freshet-console`).
+The CLI needs neither, so a server without them still serves `freshet`:
+
+| Call | Success | Other answers |
+|---|---|---|
+| `GET /v1/` | `200 {"states": [{"name", "version", "committed_at", "models"}], "access": "open"\|"read"\|"commit"}`: every state with a commit, by name, and what the caller's token may do | `401` without a token the server accepts |
+| `GET <url>/versions/{v}` | `200 {"version", "committed_at", "summary", "snapshot"}`: a kept commit and its snapshot | `404` for a version that never landed or that retention (`--keep`) dropped; `400` for a `v` that is not a positive integer |
+
+Flags, exit codes and the lossless-mapping details:
+[CONFIG.md](./CONFIG.md#state-a-file-or-hosted-state).
 
 ## 3. The language bindings (marshalling-only)
 
@@ -260,7 +309,7 @@ All three route through `plan_from_json`; none contains planning logic.
 ```c
 #include "planner.h"                                 // crates/freshet-ffi/include, generated by cbindgen
 uint32_t    planner_abi_version(void);               // 1; bumped on any breaking change
-const char *planner_contract_version(void);          // "planner-embed/5"; static, never free it
+const char *planner_contract_version(void);          // "planner-embed/6"; static, never free it
 char       *planner_plan(const char *request_json);  // JSON in, JSON out
 void        planner_string_free(char *ptr);          // the ONLY way to free the result
 ```
@@ -288,6 +337,13 @@ Stateless: pass `prior_state` in, store `next_state` yourself. With the feature
 off the crate is a plain Rust re-export of the same `plan` function (used for
 native tests).
 
+`JSON.parse` is fine for reading a plan, but not for `next_state`. Its fingerprints
+are u64s past 2^53, which `JSON.parse` rounds without an error, and a rounded state
+makes every model look edited. Carry `next_state` as text, or parse with something
+that keeps large integers exact. `apps/effortmap-web` does both: `planner.js` cuts
+`next_state` out of the response as text, and `json.js` parses the rest with any
+integer past 2^53 as a `BigInt`.
+
 ### Python — `freshet-py` (glue behind `--features extension-module`; build with `maturin build --features extension-module`, abi3-py38 wheel)
 
 ```python
@@ -308,9 +364,9 @@ a dict with an `error` key. One `abi3` wheel (`maturin build`, from
 
 ## 4. Not built (do not look for it)
 
-No gRPC server, and no file-watcher: the `watch` feature is still a dependency
-stub, on purpose — a daemon that reparsed under a client mid-plan would invalidate
-that client's commit token without it having asked for a reload. (`freshet-serve`
-does ship an HTTP transport and binary behind its `http` feature.) The daemon plans
-code changes and restatements but does not render SQL; use the CLI or the funnel
-(`render`) for that.
+No gRPC server, by decision (2026-10-27): HTTP and JSON are the funnel every
+binding shares, and nothing that consumes the planner asked for another transport.
+(`freshet-serve` ships the HTTP transport and binary behind its `http` feature, a
+bearer token through `FRESHET_SERVE_TOKEN`, and `--watch` behind `watch` — see
+[CONFIG.md](./CONFIG.md).) The daemon plans code changes and restatements but does
+not render SQL; use the CLI or the funnel (`render`) for that.

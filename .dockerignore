@@ -4,3 +4,5 @@ target
 **/node_modules
 **/.venv
 **/__pycache__
+# The console ships as pages; its tests stay behind.
+apps/freshet-console/tests

@@ -25,6 +25,8 @@
 //! comparable to this crate's criterion rows, which time library calls in-process.
 
 pub mod export;
+pub mod gate;
+pub mod quality;
 
 use std::collections::BTreeMap;
 
@@ -32,7 +34,7 @@ use freshet_sql::Catalog;
 use serde::{Deserialize, Serialize};
 
 /// Knobs for a synthetic layered-DAG project.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenSpec {
     /// Number of dependency layers (depth). Layer 0 reads the source table.
     pub layers: usize,
@@ -42,11 +44,28 @@ pub struct GenSpec {
     pub cols: usize,
     /// Deterministic seed (which parent each model picks).
     pub seed: u64,
+    /// How many models of the previous layer each later model joins, on `c0`. One,
+    /// the default, is a plain `select … from parent`.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub fan_in: usize,
+    /// How many of each parent's columns a model selects, at most `cols / fan_in`;
+    /// `None`, the default, is all of them. Below that, column lineage has something
+    /// to prune: a change to a column no reader selects reaches no reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<usize>,
+}
+
+fn one() -> usize {
+    1
+}
+
+fn is_one(n: &usize) -> bool {
+    *n == 1
 }
 
 impl Default for GenSpec {
     fn default() -> Self {
-        Self { layers: 8, width: 16, cols: 8, seed: 0x5151_5151 }
+        Self { layers: 8, width: 16, cols: 8, seed: 0x5151_5151, fan_in: 1, reads: None }
     }
 }
 
@@ -55,6 +74,22 @@ impl GenSpec {
     /// clamping so the capacity hint / size labels stay honest for zero-sized specs.
     pub fn model_count(&self) -> usize {
         self.layers.max(1) * self.width.max(1)
+    }
+
+    /// `fan_in` and `reads` as generated: at least one parent and no more than a
+    /// layer has, and at least one column per parent and no more than `cols` split
+    /// between them.
+    pub fn density(&self) -> (usize, usize) {
+        let cols = self.cols.max(1);
+        let fan_in = self.fan_in.clamp(1, self.width.max(1));
+        let reads = self.reads.unwrap_or(cols).clamp(1, (cols / fan_in).max(1));
+        (fan_in, reads)
+    }
+
+    /// Every model reads every column of one parent: the topology every committed
+    /// result before the density sweep was measured on.
+    fn reads_everything(&self) -> bool {
+        self.density() == (1, self.cols.max(1))
     }
 }
 
@@ -68,28 +103,96 @@ pub struct GeneratedProject {
 /// Generate a deterministic layered DAG. Layer 0 models select from a single `src`
 /// table; each later model selects its columns from one parent in the previous layer
 /// (chosen by the seeded PRNG), yielding real `depends_on` + per-column lineage.
+///
+/// With `fan_in` or `reads` set, each later model instead joins `fan_in` distinct
+/// parents on `c0` and selects `reads` columns of each, output `c{j}` being the
+/// `j`-th of them round-robin.
 pub fn generate(spec: &GenSpec) -> GeneratedProject {
+    generate_wired(spec).0
+}
+
+/// What each generated model reads, as the generator chose it: the ground truth
+/// [`quality`] checks the planner's lineage against, written down rather than parsed
+/// back out of the SQL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelWiring {
+    pub name: String,
+    /// The models read, in join order; empty for layer 0, which reads `src`. More
+    /// than one means they are joined on `c0`.
+    pub parents: Vec<String>,
+    /// For each output column `c{j}`, `(index into parents, the parent's column)`.
+    /// Layer 0's `c{j}` is `src.c{j}`, recorded as `(0, j)`.
+    pub columns: Vec<(usize, usize)>,
+}
+
+/// [`generate`], with each model's [`ModelWiring`], in generation (topological) order.
+pub fn generate_wired(spec: &GenSpec) -> (GeneratedProject, Vec<ModelWiring>) {
     let cols = spec.cols.max(1);
+    let width = spec.width.max(1);
     let col_list = (0..cols).map(|c| format!("c{c}")).collect::<Vec<_>>().join(", ");
+    let (fan_in, reads) = spec.density();
 
     let mut sources = Catalog::new();
     sources.insert("src".to_string(), (0..cols).map(|c| format!("c{c}")).collect());
 
     let mut rng = Lcg::new(spec.seed);
     let mut models = Vec::with_capacity(spec.model_count());
+    let mut wiring = Vec::with_capacity(spec.model_count());
     for layer in 0..spec.layers.max(1) {
-        for i in 0..spec.width.max(1) {
+        for i in 0..width {
             let name = format!("m_{layer}_{i}");
-            let sql = if layer == 0 {
-                format!("select {col_list} from src")
+            let (sql, parents, columns) = if layer == 0 {
+                (format!("select {col_list} from src"), Vec::new(), (0..cols).map(|j| (0, j)).collect())
+            } else if spec.reads_everything() {
+                // Exactly the draws and the SQL of every result committed before the
+                // density knobs existed, so their topologies are unchanged.
+                let parent = format!("m_{}_{}", layer - 1, rng.next_below(width));
+                (format!("select {col_list} from {parent}"), vec![parent], (0..cols).map(|j| (0, j)).collect())
             } else {
-                let parent = format!("m_{}_{}", layer - 1, rng.next_below(spec.width.max(1)));
-                format!("select {col_list} from {parent}")
+                let parents: Vec<String> = distinct(&mut rng, fan_in, width)
+                    .into_iter()
+                    .map(|p| format!("m_{}_{p}", layer - 1))
+                    .collect();
+                let chosen: Vec<Vec<usize>> = parents.iter().map(|_| distinct(&mut rng, reads, cols)).collect();
+                let inputs: Vec<(usize, usize)> =
+                    (0..reads).flat_map(|r| chosen.iter().enumerate().map(move |(p, c)| (p, c[r]))).collect();
+                let columns: Vec<(usize, usize)> = (0..cols).map(|j| inputs[j % inputs.len()]).collect();
+                (joined_select(&parents, &columns), parents, columns)
             };
-            models.push((name, sql));
+            models.push((name.clone(), sql));
+            wiring.push(ModelWiring { name, parents, columns });
         }
     }
-    GeneratedProject { models, sources }
+    (GeneratedProject { models, sources }, wiring)
+}
+
+/// `k` distinct numbers below `n`, in the order drawn (a partial Fisher–Yates).
+fn distinct(rng: &mut Lcg, k: usize, n: usize) -> Vec<usize> {
+    let mut pool: Vec<usize> = (0..n).collect();
+    for i in 0..k.min(n) {
+        let j = i + rng.next_below(n - i);
+        pool.swap(i, j);
+    }
+    pool.truncate(k.min(n));
+    pool
+}
+
+/// `select … as c{j}` over one parent, or over several joined on `c0`.
+fn joined_select(parents: &[String], columns: &[(usize, usize)]) -> String {
+    let one = parents.len() == 1;
+    let items: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(j, (p, c))| if one { format!("c{c} as c{j}") } else { format!("p{p}.c{c} as c{j}") })
+        .collect();
+    if one {
+        return format!("select {} from {}", items.join(", "), parents[0]);
+    }
+    let mut from = format!("{} as p0", parents[0]);
+    for (p, parent) in parents.iter().enumerate().skip(1) {
+        from.push_str(&format!(" join {parent} as p{p} on p0.c0 = p{p}.c0"));
+    }
+    format!("select {} from {from}", items.join(", "))
 }
 
 /// Reproducibility envelope for a benchmark run. Timings are filled by the harness /
@@ -289,7 +392,7 @@ impl Lcg {
 /// Rungs are 128 / 512 / 2048 / 5120 / **10240** models.
 ///
 /// The top rung exists because the ladder previously stopped at 5120 while
-/// `docs/ROADMAP.md` §M5 sets the exit target at "**10k models < 600ms parse**".
+/// the exit target is "**10k models < 600ms parse**".
 /// A target above the largest rung cannot pass or fail — it can only be
 /// extrapolated to, which is exactly what that milestone's own honesty rules forbid
 /// ("published multipliers are measured ratios, never round assertions"). 10240
@@ -299,13 +402,14 @@ impl Lcg {
 /// end was never generated. The range is now stated as the rungs themselves rather
 /// than as an order-of-magnitude claim, because that is the form that cannot drift
 /// from what the function returns. A 1e5 rung is deliberately *not* added here: at
-/// the measured ~60 µs/model for `build_project` it would put a single iteration
-/// near 6 s, which belongs in the nightly perf lane, not in a suite anyone runs
-/// before pushing.
+/// ~50 µs/model for `build_project` a single iteration is near 5 s, which belongs in
+/// the weekly job, not in a suite anyone runs before pushing. It is timed there as
+/// whole processes (`scripts/compare.sh --sizes 80x128,625x160`) and held to
+/// [`gate::Rules::PUBLISHED`].
 pub fn size_ladder() -> Vec<GenSpec> {
     [(8, 16), (16, 32), (32, 64), (40, 128), (80, 128)]
         .into_iter()
-        .map(|(layers, width)| GenSpec { layers, width, cols: 8, seed: 0x5151_5151 })
+        .map(|(layers, width)| GenSpec { layers, width, cols: 8, seed: 0x5151_5151, ..GenSpec::default() })
         .collect()
 }
 
@@ -332,6 +436,58 @@ mod tests {
     fn generation_is_deterministic() {
         let spec = GenSpec::default();
         assert_eq!(generate(&spec).models, generate(&spec).models);
+        let sparse = GenSpec { fan_in: 3, reads: Some(2), ..spec };
+        assert_eq!(generate(&sparse).models, generate(&sparse).models);
+    }
+
+    /// The committed results were measured on the topology the generator made before
+    /// `fan_in` and `reads` existed. Pinned by its SQL, not by a rerun of itself.
+    #[test]
+    fn the_default_topology_is_the_one_the_committed_results_measured() {
+        let g = generate(&GenSpec { layers: 3, width: 4, cols: 2, seed: 0x5151_5151, ..GenSpec::default() });
+        let sql: Vec<&str> = g.models.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(&sql[..4], ["select c0, c1 from src"; 4]);
+        assert!(sql[4..].iter().all(|s| s.starts_with("select c0, c1 from m_")), "{sql:?}");
+        let same = generate(&GenSpec { layers: 3, width: 4, cols: 2, seed: 0x5151_5151, reads: Some(2), ..GenSpec::default() });
+        assert_eq!(g.models, same.models, "reading every column is the default topology");
+        // The manifest JSON of a default spec is what it was, too.
+        let json = serde_json::to_string(&GenSpec::default()).unwrap();
+        assert_eq!(json, r#"{"layers":8,"width":16,"cols":8,"seed":1364283729}"#);
+        let old: GenSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!((old.fan_in, old.reads), (1, None));
+    }
+
+    #[test]
+    fn a_sparse_model_joins_its_parents_and_reads_what_its_wiring_says() {
+        let spec = GenSpec { layers: 2, width: 4, cols: 4, seed: 9, fan_in: 2, reads: Some(1) };
+        let (g, wiring) = generate_wired(&spec);
+        let (name, sql) = &g.models[4];
+        let w = &wiring[4];
+        assert_eq!(&w.name, name);
+        assert_eq!(w.parents.len(), 2);
+        assert_ne!(w.parents[0], w.parents[1], "distinct parents");
+        // reads = 1 per parent, round-robin over the two: c0, c2 from p0; c1, c3 from p1.
+        assert_eq!(w.columns[0].0, 0);
+        assert_eq!(w.columns[1].0, 1);
+        assert_eq!(w.columns[0], w.columns[2]);
+        let expected_from = format!("from {} as p0 join {} as p1 on p0.c0 = p1.c0", w.parents[0], w.parents[1]);
+        assert!(sql.ends_with(&expected_from), "{sql}");
+        assert!(sql.starts_with(&format!("select p0.c{} as c0, p1.c{} as c1", w.columns[0].1, w.columns[1].1)), "{sql}");
+        let project = freshet_sql::build_project(&g.models, &g.sources).unwrap();
+        let mut deps = project.get(name).unwrap().depends_on.clone();
+        deps.sort();
+        let mut parents = w.parents.clone();
+        parents.sort();
+        assert_eq!(deps, parents);
+    }
+
+    #[test]
+    fn density_is_clamped_to_what_a_model_can_read() {
+        let spec = |fan_in, reads| GenSpec { layers: 2, width: 3, cols: 8, seed: 1, fan_in, reads };
+        assert_eq!(spec(1, None).density(), (1, 8));
+        assert_eq!(spec(0, Some(0)).density(), (1, 1));
+        assert_eq!(spec(9, None).density(), (3, 2), "no more parents than a layer has");
+        assert_eq!(spec(2, Some(8)).density(), (2, 4), "cols split between the parents");
     }
 
     #[test]

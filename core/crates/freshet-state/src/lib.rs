@@ -14,8 +14,8 @@
 //!
 //! 2. **[`StateBackend`].** Where fingerprints (and, later, materialized-partition
 //!    watermarks) are persisted between runs. The OSS [`FileStateBackend`] writes
-//!    JSON to local disk. An optional multi-tenant hosted backend (the
-//!    hosted state service, dagron Cloud) implements this same trait.
+//!    JSON to local disk. A hosted backend (such as `freshet-state-server`)
+//!    implements this same trait.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};

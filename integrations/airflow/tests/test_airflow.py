@@ -29,7 +29,8 @@ from freshet_airflow import build_dag  # noqa: E402
 from freshet_airflow.operators.bash import FreshetBashOperator  # noqa: E402
 from freshet_airflow.operators.sql import FreshetSQLExecuteQueryOperator  # noqa: E402
 
-FIXTURES = pathlib.Path(__file__).with_name("fixtures")
+# The contract fixtures belong to freshet-plan, the reader this package builds on.
+FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "plan" / "tests" / "fixtures"
 
 
 def fixture(name):

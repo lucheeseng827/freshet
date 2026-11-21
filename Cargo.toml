@@ -29,6 +29,7 @@ members = [
     "crates/freshet-ffi",
     "crates/freshet-cli",
     "crates/freshet-serve",
+    "crates/freshet-state-server",
     "crates/freshet-dbt",
     "crates/freshet-wasm",
     "crates/freshet-py",
@@ -47,11 +48,12 @@ default-members = [
     "crates/freshet-ffi",
     "crates/freshet-cli",
     "crates/freshet-serve",
+    "crates/freshet-state-server",
     "crates/freshet-dbt",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/lucheeseng827/freshet"
@@ -59,17 +61,17 @@ repository = "https://github.com/lucheeseng827/freshet"
 [workspace.dependencies]
 # --- The planner core, one way. Declared once, here; crates reference these as
 #     `{ workspace = true }` and never hardcode a relative path. ---
-freshet-core  = { path = "core/crates/freshet-core", version = "0.1.0" }
-freshet-sql   = { path = "core/crates/freshet-sql", version = "0.1.0" }
-freshet-state = { path = "core/crates/freshet-state", version = "0.1.0" }
-freshet-api   = { path = "core/crates/freshet-api", version = "0.1.0" }
+freshet-core  = { path = "core/crates/freshet-core", version = "0.2.0" }
+freshet-sql   = { path = "core/crates/freshet-sql", version = "0.2.0" }
+freshet-state = { path = "core/crates/freshet-state", version = "0.2.0" }
+freshet-api   = { path = "core/crates/freshet-api", version = "0.2.0" }
 
 # --- crates in this workspace ---
-freshet-incremental = { path = "crates/freshet-incremental", version = "0.1.0" }
-freshet-fingerprint = { path = "crates/freshet-fingerprint", version = "0.1.0" }
-freshet-render      = { path = "crates/freshet-render", version = "0.1.0" }
-freshet-embed       = { path = "crates/freshet-embed", version = "0.1.0" }
-freshet-dbt         = { path = "crates/freshet-dbt", version = "0.1.0" }
+freshet-incremental = { path = "crates/freshet-incremental", version = "0.2.0" }
+freshet-fingerprint = { path = "crates/freshet-fingerprint", version = "0.2.0" }
+freshet-render      = { path = "crates/freshet-render", version = "0.2.0" }
+freshet-embed       = { path = "crates/freshet-embed", version = "0.2.0" }
+freshet-dbt         = { path = "crates/freshet-dbt", version = "0.2.0" }
 
 # --- shared third-party. sqlparser is pinned BYTE-IDENTICAL to the core's
 #     freshet-sql (0.52 + "visitor") so the canonical AST Display never drifts a

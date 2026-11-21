@@ -4,7 +4,7 @@ Every fixture here except the v4 one is a byte-for-byte copy of a constant in
 dagron's ``crates/dagron-state/tests/wire_contract.rs``, and the last test in this
 file fails if a copy drifts. Two consumers agreeing on one contract means agreeing
 on the same bytes, so these are not re-typed from memory and are not edited to make
-a test pass: if one of these tests fails, the contract moved, and ``plan.py`` (and
+a test pass: if one of these tests fails, the contract moved, and ``freshet_plan`` (and
 ``WIRE_CONTRACT_VERSION``) move with it.
 """
 
@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from freshet_airflow import (
+from freshet_plan import (
     WIRE_CONTRACT_VERSION,
     ContractViolation,
     compile_plan,
@@ -162,7 +162,15 @@ def test_the_golden_plan_compiles_end_to_end():
 
 
 def test_the_contract_version_is_stamped():
-    assert WIRE_CONTRACT_VERSION == "planner-embed/5"
+    assert WIRE_CONTRACT_VERSION == "planner-embed/6"
+
+
+def test_a_cold_plan_says_so_and_a_warm_one_is_unchanged():
+    # Contract v6: the planner writes `cold` only on a plan with no state behind it.
+    assert parse_plan('{"models":[],"cold":true}').cold is True
+    assert parse_plan('{"models":[]}').cold is False
+    with pytest.raises(ContractViolation, match="plan.cold"):
+        parse_plan('{"models":[],"cold":"yes"}')
 
 
 def test_real_planner_output_compiles_into_a_run_graph():

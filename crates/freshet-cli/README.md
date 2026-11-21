@@ -123,10 +123,16 @@ sequenceDiagram
 | `freshet restate` | Replan specific partitions of one model (ignores fingerprints; with `--state`, records the restatement in the ledger) |
 | `freshet fingerprint` | Each model's AST-canonical hash + any text-scheme fallback |
 | `freshet graph` | The project's topological model order |
+| `freshet history` | Hosted state's commits, newest first: what each changed, and when |
 | `freshet submit` | Post the plan (with its CU estimate) to a consumer that runs it; never commits |
 
 `--json` on `plan`/`restate` emits the frozen `freshet-embed` wire contract — the
 same JSON every other binding produces, and what downstream consumers read.
+
+`--strict-refs`, on any command, refuses a table that is neither a model nor declared
+in `sources.json` (`"raw": []` declares one without its columns). Without it such a
+table is external, so `from stgg` meaning the model `stg` silently loses the edge;
+only a table one edit from a model or source is warned about. Run CI with it on.
 
 ## Budget headroom
 
@@ -170,16 +176,17 @@ not: it causes an under-rebuild, the bug class this tool exists to prevent. See
 
 ## Hosted state
 
-`--state` may name a **hosted state API** instead of a file — dagron Cloud serves
-one at `https://<edge>/state/v1` — with an API token in `FRESHET_STATE_TOKEN`:
+`--state` may name a **hosted state API** instead of a file — `freshet-state-server`
+is one a team runs itself — with its token in `FRESHET_STATE_TOKEN`:
 
 ```sh
-export FRESHET_STATE_TOKEN=…            # a workspace token; commits need state:commit
-S=https://edge.example.com/state/v1
+export FRESHET_STATE_TOKEN=…            # the server's token; its read-only one cannot commit
+S=https://state.example.com/v1/analytics
 freshet plan --project ./models --state $S --json > plan.json
-# stderr: hosted state: version 7 at https://edge.example.com/state/v1
+# stderr: hosted state: version 7 at https://state.example.com/v1/analytics
 # ... execute plan.json, and only if it succeeded:
 freshet plan --project ./models --state $S --commit --expect-version 7
+freshet history --state $S              # newest first; --before <version> for older
 ```
 
 It holds the same document a state file does (fingerprints + the partition ledger;

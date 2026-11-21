@@ -518,7 +518,7 @@ mod tests {
     use super::*;
 
     fn spec() -> GenSpec {
-        GenSpec { layers: 6, width: 5, cols: 3, seed: 7 }
+        GenSpec { layers: 6, width: 5, cols: 3, seed: 7, ..GenSpec::default() }
     }
 
     /// `(child, parent)` model edges per freshet-sql — an independent reading of the

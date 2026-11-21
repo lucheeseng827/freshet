@@ -28,7 +28,7 @@ use std::os::raw::c_char;
 
 /// [`freshet_embed::WIRE_CONTRACT_VERSION`], NUL-terminated for C.
 const CONTRACT_VERSION: &CStr = match CStr::from_bytes_with_nul(
-    concat!("planner-embed/5", "\0").as_bytes(),
+    concat!("planner-embed/6", "\0").as_bytes(),
 ) {
     Ok(v) => v,
     Err(_) => panic!("the contract version must be a C string"),
@@ -41,7 +41,7 @@ pub extern "C" fn planner_abi_version() -> u32 {
     1
 }
 
-/// The wire contract revision [`planner_plan`] speaks, e.g. `"planner-embed/5"`. A
+/// The wire contract revision [`planner_plan`] speaks, e.g. `"planner-embed/6"`. A
 /// static string: do **not** pass it to [`planner_string_free`]. Adding this symbol
 /// did not change any existing one, so the ABI version stays 1.
 #[no_mangle]

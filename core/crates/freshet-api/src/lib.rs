@@ -41,10 +41,9 @@ pub use freshet_state::{
 /// The embeddable planner: a project plus a state backend, with the cost model
 /// (`CostModel`) all cost / budget paths share.
 ///
-/// The cost model is configurable via [`BackfillPlanner::with_cost_model`] so a
-/// hosted tenant on a custom cost model sees the same numbers in the OSS
-/// budget gate that the EE crate meters them against — no drift between the
-/// quota check and the bill.
+/// The cost model is configurable via [`BackfillPlanner::with_cost_model`] so an
+/// embedder with its own cost model sees the same numbers in the budget gate as
+/// anywhere else it reads them: no drift between the cap and the estimate.
 pub struct BackfillPlanner<B: StateBackend> {
     project: Project,
     backend: B,
@@ -75,8 +74,7 @@ pub struct PlanResult {
 ///   [`ComputeMode::Byo`] the compute it protects is the operator's own, which is
 ///   exactly why it is theirs to set.
 ///
-/// It is deliberately **not** a tier gate, though it was once documented as one (see
-/// `docs/ARCHITECTURE.md` §6, corrected). Two reasons it cannot be: under
+/// It is deliberately **not** a tier gate. Two reasons it cannot be: under
 /// [`ComputeMode::Byo`] it rations compute the customer pays their own warehouse for,
 /// so it prices nothing; and this is Apache-2.0, so the arm below is source the
 /// operator compiles and can delete.
@@ -183,9 +181,9 @@ impl<B: StateBackend> BackfillPlanner<B> {
         }
     }
 
-    /// Override the cost model used by `plan()` and the budget gate. An EE
-    /// embedder threads a tenant-specific `CostModel` through here so the OSS
-    /// quota check and the embedder's meter agree on what a plan costs.
+    /// Override the cost model used by `plan()` and the budget gate. An embedder
+    /// threads its own `CostModel` through here so the budget check and the
+    /// embedder's own accounting agree on what a plan costs.
     pub fn with_cost_model(mut self, cost_model: CostModel) -> Self {
         self.cost_model = cost_model;
         self

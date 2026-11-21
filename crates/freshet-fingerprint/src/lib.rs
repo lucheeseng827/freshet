@@ -158,39 +158,136 @@ impl AstFingerprinter {
         AstFingerprintReport { per_model }
     }
 
+    /// [`report`](Self::report), finishing the tree halves [`TreeHashes`] already
+    /// hashed from the planner core's parse instead of parsing each model again. A
+    /// model with no tree hash, and every model under a scheme other than
+    /// [`FingerprintScheme::AstV2`], is fingerprinted as usual.
+    ///
+    /// The fingerprints are byte for byte [`report`](Self::report)'s, provided each
+    /// tree was the one `sqlparser`'s generic dialect makes of that model's own `sql`
+    /// — which `freshet_sql::build_project_taking` hands over, by construction.
+    #[cfg(feature = "ast")]
+    pub fn report_hashed(&self, project: &Project, mut trees: TreeHashes) -> AstFingerprintReport {
+        let mut per_model = BTreeMap::new();
+        for name in project.names() {
+            let m = project.get(name).expect("names() yields known models");
+            let fp = match trees.0.remove(name) {
+                Some(h) if self.scheme == FingerprintScheme::AstV2 => h.finish(m),
+                _ => self.fingerprint_model(m),
+            };
+            per_model.insert(name.clone(), fp);
+        }
+        AstFingerprintReport { per_model }
+    }
+
     /// Fingerprint one model. Preserves freshet-state's own-definition-only semantics —
     /// folds the canonical SQL form + column-name shape + sorted dep names. ONLY the
     /// SQL sub-step changes (AST-canonical, with a text fallback). The scheme byte is
     /// hashed FIRST so a `Text` and an `AstV1` hash of the same bytes never collide.
     pub fn fingerprint_model(&self, model: &Model) -> ModelFingerprint {
+        self.hash_sql(&model.sql).finish(model)
+    }
+
+    /// The half of a fingerprint `sql` decides, under this fingerprinter's scheme:
+    /// the parse, for the AST schemes. [`SqlHash::finish`] adds the rest.
+    pub fn hash_sql(&self, sql: &str) -> SqlHash {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let scheme = match self.scheme {
-            FingerprintScheme::AstV2 if hash_structure(&model.sql, &mut h) => FingerprintScheme::AstV2,
+            FingerprintScheme::AstV2 if hash_structure(sql, &mut h) => FingerprintScheme::AstV2,
             // Byte-for-byte the preimage this crate's default wrote before AstV2
             // existed — which is what lets `reconcile` recognise those state files.
-            FingerprintScheme::AstV1 => match try_canonical_sql(&model.sql) {
+            FingerprintScheme::AstV1 => match try_canonical_sql(sql) {
                 Some(c) => {
                     (FingerprintScheme::AstV1 as u8).hash(&mut h);
                     c.hash(&mut h);
                     FingerprintScheme::AstV1
                 }
-                None => text_preimage(&model.sql, &mut h),
+                None => text_preimage(sql, &mut h),
             },
             // AstV2 over SQL that did not parse (`hash_structure` wrote nothing), and
             // Text itself.
-            FingerprintScheme::AstV2 | FingerprintScheme::Text => text_preimage(&model.sql, &mut h),
+            FingerprintScheme::AstV2 | FingerprintScheme::Text => text_preimage(sql, &mut h),
         };
-        // Column shape participates: add/remove/rename a column is a change.
-        for c in &model.columns {
-            c.name.hash(&mut h);
-        }
-        // The set of upstream names (sorted) — re-pointing a dependency is a change.
-        let mut deps: Vec<&String> = model.depends_on.iter().collect();
-        deps.sort();
-        for up in deps {
-            up.hash(&mut h);
-        }
-        ModelFingerprint { fingerprint: h.finish(), scheme }
+        SqlHash { state: h, scheme }
+    }
+}
+
+/// The half of a model's fingerprint its SQL decides: the SQL hashed under one
+/// scheme — for the AST schemes, the expensive half, a parse — waiting for the rest,
+/// the model's column names and dependencies, which are cheap.
+///
+/// A function of the SQL text alone, so a caller that keeps a model's SQL across plans
+/// (the daemon) can keep this beside it and never parse that SQL again: finishing it
+/// against the model as it is now is exactly [`AstFingerprinter::fingerprint_model`],
+/// whatever its columns or dependencies have become since.
+#[derive(Clone, Debug)]
+pub struct SqlHash {
+    state: std::collections::hash_map::DefaultHasher,
+    scheme: FingerprintScheme,
+}
+
+impl SqlHash {
+    /// The fingerprint of `model`, which must have the SQL this was hashed from.
+    pub fn finish(&self, model: &Model) -> ModelFingerprint {
+        ModelFingerprint { fingerprint: finish(self.state.clone(), model), scheme: self.scheme }
+    }
+
+    /// The scheme the SQL was hashed under: [`FingerprintScheme::Text`] for SQL that
+    /// an AST scheme could not parse.
+    pub fn scheme(&self) -> FingerprintScheme {
+        self.scheme
+    }
+
+    /// The [`FingerprintScheme::AstV2`] half of a query already parsed, by value: the
+    /// single statement its model's SQL parses to, as `freshet_sql::build_project_taking`
+    /// hands it over.
+    #[cfg(feature = "ast")]
+    pub fn of_query(query: sqlparser::ast::Query) -> SqlHash {
+        let mut tree = sqlparser::ast::Statement::Query(Box::new(query));
+        strip_nested(&mut tree);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_tree(&tree, &mut h);
+        SqlHash { state: h, scheme: FingerprintScheme::AstV2 }
+    }
+}
+
+/// The half of a fingerprint after the SQL: the column shape and the dependencies.
+fn finish(mut h: std::collections::hash_map::DefaultHasher, model: &Model) -> Fingerprint {
+    // Column shape participates: add/remove/rename a column is a change.
+    for c in &model.columns {
+        c.name.hash(&mut h);
+    }
+    // The set of upstream names (sorted) — re-pointing a dependency is a change.
+    let mut deps: Vec<&String> = model.depends_on.iter().collect();
+    deps.sort();
+    for up in deps {
+        up.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The tree half of each model's [`FingerprintScheme::AstV2`] fingerprint, hashed
+/// from a tree the caller already parsed — the planner core's, handed over by
+/// `freshet_sql::build_project_taking` — and finished by
+/// [`AstFingerprinter::report_hashed`].
+///
+/// It keeps a hasher's state per model, not the tree. The tree is hashed and freed the
+/// moment it is handed over: keeping 100,000 trees alive until the plan cost more, in
+/// fresh memory for everything allocated after them, than parsing them again did.
+#[cfg(feature = "ast")]
+#[derive(Default)]
+pub struct TreeHashes(BTreeMap<String, SqlHash>);
+
+#[cfg(feature = "ast")]
+impl TreeHashes {
+    /// Hash `query`, the single statement `name`'s SQL parses to.
+    pub fn take(&mut self, name: &str, query: sqlparser::ast::Query) {
+        self.0.insert(name.to_string(), SqlHash::of_query(query));
+    }
+
+    /// Each model's SQL half, for a caller that keeps them across plans.
+    pub fn into_map(self) -> BTreeMap<String, SqlHash> {
+        self.0
     }
 }
 
@@ -220,7 +317,19 @@ pub struct Reconciled {
 /// model is re-keyed once". Only mismatching models pay for the older schemes, so a
 /// steady-state plan costs exactly what it did.
 pub fn reconcile(prior: &StateSnapshot, project: &Project, fp: &AstFingerprinter) -> Reconciled {
-    let current = fp.fingerprint_project(project);
+    reconcile_from(prior, project, fp, fp.fingerprint_project(project))
+}
+
+/// [`reconcile`], with today's fingerprints under `fp`'s scheme already computed —
+/// by [`AstFingerprinter::report_hashed`], say, from a parse the caller already had.
+/// Only a model whose stored fingerprint does not match is fingerprinted again, under
+/// the older schemes, which is rare: a scheme upgrade, or a real edit.
+pub fn reconcile_from(
+    prior: &StateSnapshot,
+    project: &Project,
+    fp: &AstFingerprinter,
+    current: BTreeMap<String, Fingerprint>,
+) -> Reconciled {
     let mut changed = BTreeSet::new();
     let mut rekeyed = BTreeSet::new();
     // freshet-state's scheme hashes whole projects; computed once, and only if needed.
@@ -264,9 +373,16 @@ fn text_preimage(sql: &str, h: &mut std::collections::hash_map::DefaultHasher) -
 /// exactly one statement, so the caller can fall back.
 #[cfg(feature = "ast")]
 fn hash_structure(sql: &str, h: &mut std::collections::hash_map::DefaultHasher) -> bool {
+    let Some(tree) = structural_tree(sql) else { return false };
+    hash_tree(&tree, h);
+    true
+}
+
+/// Stream a parenthesis-free tree's structure into `h`, tagged as AstV2.
+#[cfg(feature = "ast")]
+fn hash_tree(tree: &sqlparser::ast::Statement, h: &mut std::collections::hash_map::DefaultHasher) {
     use std::fmt::Write as _;
     use std::hash::Hasher as _;
-    let Some(tree) = structural_tree(sql) else { return false };
 
     /// Feeds formatted output straight into the hasher: a large model's Debug form is
     /// several times its SQL, and there is no reason to allocate it just to hash it.
@@ -282,7 +398,6 @@ fn hash_structure(sql: &str, h: &mut std::collections::hash_map::DefaultHasher) 
     // Terminate the stream the way `str::hash` terminates a string, so what follows
     // (column names) can never be read as part of the tree. UTF-8 never holds 0xff.
     h.write_u8(0xff);
-    true
 }
 
 #[cfg(not(feature = "ast"))]
@@ -294,14 +409,22 @@ fn hash_structure(_sql: &str, _h: &mut std::collections::hash_map::DefaultHasher
 /// the tree AstV2 hashes. `None` when it is not exactly one statement.
 #[cfg(feature = "ast")]
 pub fn structural_tree(sql: &str) -> Option<sqlparser::ast::Statement> {
-    use sqlparser::ast::{visit_expressions_mut, Expr, Value};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::parser::Parser;
     let mut stmts = Parser::parse_sql(&GenericDialect {}, sql).ok()?;
     if stmts.len() != 1 {
         return None;
     }
-    let _ = visit_expressions_mut(&mut stmts, |e| {
+    let mut tree = stmts.pop()?;
+    strip_nested(&mut tree);
+    Some(tree)
+}
+
+/// Remove every redundant parenthesis from `tree`, in place.
+#[cfg(feature = "ast")]
+fn strip_nested(tree: &mut sqlparser::ast::Statement) {
+    use sqlparser::ast::{visit_expressions_mut, Expr, Value};
+    let _ = visit_expressions_mut(tree, |e| {
         // A loop, for `((a))`. Replacing the node with its contents loses nothing: the
         // tree's shape already says what the parentheses grouped.
         while let Expr::Nested(inner) = e {
@@ -310,7 +433,6 @@ pub fn structural_tree(sql: &str) -> Option<sqlparser::ast::Statement> {
         }
         std::ops::ControlFlow::<()>::Continue(())
     });
-    stmts.pop()
 }
 
 /// Canonicalize SQL by parsing and re-`Display`ing the AST. Returns `None` (forcing
@@ -387,6 +509,77 @@ mod tests {
 
     fn v1(sql: &str) -> u64 {
         AstFingerprinter::with_scheme(FingerprintScheme::AstV1).fingerprint_model(&model("m", sql)).fingerprint
+    }
+
+    /// Fingerprinting from the planner core's parse is fingerprinting from scratch,
+    /// under every scheme: the parse is the same call on the same text, and this is
+    /// the check that it stays so. The corpus covers what the tree rewrite touches
+    /// (parentheses), what a parser could keep or drop (comments, case, quoting), and
+    /// the shapes a project's models take.
+    #[cfg(feature = "ast")]
+    #[test]
+    fn fingerprinting_the_core_parse_is_fingerprinting_from_scratch() {
+        let sources: freshet_sql::Catalog = [("raw".to_string(), vec!["a".into(), "b".into(), "k".into()])].into();
+        let models: Vec<(String, String)> = [
+            ("stg", "select a, b, k from raw"),
+            ("parens", "select ((a + b)) * (k) as s, (a) from stg where ((a > 1) and (b < 2))"),
+            ("spelled", "SELECT   a,\n  b -- the columns\nFROM stg /* the table */ WHERE a > 1;"),
+            ("quoted", "select \"a\" as \"A\", b as B from stg"),
+            ("cte", "with t as (select a, k from stg), u as (select k from t) select t.a from t join u using (k)"),
+            ("agg", "select k, sum(a) as total, count(distinct b) as n from stg group by k having sum(a) > 0"),
+            ("win", "select k, row_number() over (partition by k order by a desc) as rn from stg"),
+            ("sets", "select a from stg union all select b from stg"),
+            ("sub", "select a from stg where k in (select k from parens) and exists (select 1 from cte)"),
+            ("cases", "select case when a > 1 then 'x' else 'y' end as c, cast(b as varchar) as d from stg"),
+            ("ordered", "select a, b from stg order by a nulls last, b limit 10"),
+        ]
+        .into_iter()
+        .map(|(n, sql)| (n.to_string(), sql.to_string()))
+        .collect();
+        let built = |keep: &dyn Fn(&str) -> bool| {
+            let mut trees = TreeHashes::default();
+            let mut nested = false;
+            let b = freshet_sql::build_project_taking(&models, &sources, Some(freshet_sql::Undeclared::Refuse), |name, q| {
+                nested |= format!("{q:?}").contains("Nested");
+                if keep(name) {
+                    trees.take(name, q);
+                }
+            })
+            .unwrap();
+            (b.project, trees, nested)
+        };
+        for scheme in [FingerprintScheme::AstV2, FingerprintScheme::AstV1, FingerprintScheme::Text] {
+            let fp = AstFingerprinter::with_scheme(scheme);
+            let (project, trees, nested) = built(&|_| true);
+            assert!(nested, "the parentheses really were in the trees handed over");
+            assert_eq!(trees.0.len(), models.len());
+            let from_scratch = fp.report(&project).per_model;
+            assert_eq!(fp.report_hashed(&project, trees).per_model, from_scratch, "{scheme:?}");
+            // A model the caller has no tree hash for is parsed as usual.
+            let (project, partial, _) = built(&|name| name != "parens");
+            assert_eq!(fp.report_hashed(&project, partial).per_model, from_scratch, "{scheme:?}, one parsed here");
+        }
+    }
+
+    /// The SQL half is a function of the SQL alone: kept from one version of a model
+    /// and finished against another with the same SQL but other columns and
+    /// dependencies, it gives that version's fingerprint exactly — which is what lets
+    /// the daemon keep it across reloads.
+    #[test]
+    fn a_kept_sql_hash_finishes_to_the_fingerprint_of_the_model_as_it_is_now() {
+        let then = model("m", "select (a) from t");
+        let mut now = then.clone();
+        now.columns.push(Column::new("b", vec![ColumnRef::new("u", "b")]));
+        now.depends_on = vec!["u".into(), "t".into()];
+        for scheme in [FingerprintScheme::AstV2, FingerprintScheme::AstV1, FingerprintScheme::Text] {
+            let fp = AstFingerprinter::with_scheme(scheme);
+            let kept = fp.hash_sql(&then.sql);
+            assert_eq!(kept.finish(&then), fp.fingerprint_model(&then), "{scheme:?}");
+            assert_eq!(kept.finish(&now), fp.fingerprint_model(&now), "{scheme:?}");
+            assert_ne!(kept.finish(&now), kept.finish(&then), "{scheme:?}: columns and deps still count");
+        }
+        // SQL an AST scheme cannot parse is kept under the Text scheme it fell back to.
+        assert_eq!(AstFingerprinter::new().hash_sql("selec 1").scheme(), FingerprintScheme::Text);
     }
 
     /// The M2 exit criterion, cosmetic half: every edit here is inert, so every

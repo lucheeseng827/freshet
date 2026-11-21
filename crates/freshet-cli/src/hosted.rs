@@ -1,12 +1,13 @@
 //! The hosted-state client: `--state https://<edge>/state/v1`.
 //!
-//! Speaks the hosted state protocol dagron Cloud's edge serves (and any server that
+//! Speaks the hosted state protocol `freshet-state-server` serves (and any server that
 //! implements the same three routes):
 //!
 //! | Request | Answer |
 //! |---|---|
 //! | `GET  {url}/current` | `200 {"version": int\|null, "snapshot": StateSnapshot}` |
 //! | `POST {url}/commit` `{"expected_version": int\|null, "snapshot", "summary"}` | `200 {"version"}` · `409 {"error", "expected", "found"}` |
+//! | `GET  {url}/history?limit=N[&before=V]` | `200 {"commits": [{"version", "committed_at", "summary"}], "limit", "next_before"}`, newest first |
 //!
 //! `{url}` is what `--state` names, in full: like `submit --to`, freshet does not
 //! guess where anyone mounted anything. The bearer token comes from
@@ -27,7 +28,8 @@
 //! Lossless in both directions, or refused. A server that returns fields this
 //! freshet has no slot for is refused rather than planned against: planning without
 //! them, then committing, would drop them from hosted state for good. (The server
-//! refuses the mirror image — see the hosted state service, dagron Cloud.)
+//! refuses the mirror image: `freshet-state-server` answers a commit it could not
+//! store whole with a 422.)
 
 use std::time::Duration;
 
@@ -48,10 +50,33 @@ pub struct HostedState {
     token: String,
 }
 
+/// One commit in hosted state's history, newest first.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HistoryCommit {
+    pub version: i64,
+    pub committed_at: String,
+    /// The server's diff against the commit before (`changed`, `removed`,
+    /// `watermarks_changed`), and the committer's own words under `context`.
+    pub summary: Value,
+}
+
+/// A page of history, and the limit the server applied to it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct History {
+    pub commits: Vec<HistoryCommit>,
+    pub limit: i64,
+    /// The `before` for the next page; `None` when nothing older is kept.
+    pub next_before: Option<i64>,
+    /// Whether the server pages at all: it sent `next_before`, even as `null`. One
+    /// that does not ignores `before` and can only show its newest page.
+    #[serde(skip)]
+    pub pages: bool,
+}
+
 /// What a commit came back with.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommitOutcome {
-    /// Landed: the version the workspace is now at.
+    /// Landed: the version the state is now at.
     Committed(i64),
     /// Lost the race: the state moved after this plan was computed.
     Conflict {
@@ -70,8 +95,8 @@ impl HostedState {
             .filter(|t| !t.is_empty());
         let Some(token) = token else {
             bail!(
-                "--state {url} is hosted state: set {TOKEN_ENV} to an API token for the workspace \
-                 (a token with the state:commit scope if this run commits)"
+                "--state {url} is hosted state: set {TOKEN_ENV} to the server's token \
+                 (a read-only token plans but cannot commit)"
             );
         };
         Self::with_token(url, token)
@@ -141,6 +166,30 @@ impl HostedState {
         let reply: Value = serde_json::from_str(&body)
             .with_context(|| format!("{endpoint} answered something other than JSON"))?;
         parse_current(&reply).with_context(|| format!("reading the state {endpoint} returned"))
+    }
+
+    /// `GET {url}/history?limit=N[&before=V]`: the newest commits older than `before`
+    /// (all of them without it), at most `limit` (the server may clamp it, and says
+    /// what it used).
+    pub fn history(&self, limit: usize, before: Option<i64>) -> Result<History> {
+        let endpoint = format!("{}/history", self.url);
+        let query = match before {
+            Some(v) => format!("?limit={limit}&before={v}"),
+            None => format!("?limit={limit}"),
+        };
+        let mut resp = Self::agent()
+            .get(&format!("{endpoint}{query}"))
+            .header("authorization", &format!("Bearer {}", self.token))
+            .call()
+            .with_context(|| format!("reading hosted state history from {endpoint}"))?;
+        let status = resp.status().as_u16();
+        let body = read_body(&mut resp).with_context(|| format!("reading {endpoint}"))?;
+        if status != 200 {
+            bail!("{endpoint} refused to list history (HTTP {status}): {}", server_message(&body));
+        }
+        let reply: Value = serde_json::from_str(&body)
+            .with_context(|| format!("{endpoint} answered something other than JSON"))?;
+        parse_history(&reply).with_context(|| format!("reading the history {endpoint} returned"))
     }
 
     /// `POST {url}/commit`: land `snapshot` iff the state is still at `expected`.
@@ -220,6 +269,38 @@ fn is_loopback(host: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Read `{commits: [{version, committed_at, summary}], limit, next_before}`.
+fn parse_history(reply: &Value) -> Result<History> {
+    let Some(commits) = reply.get("commits").and_then(Value::as_array) else {
+        bail!("the reply has no `commits` list");
+    };
+    let limit = reply.get("limit").and_then(Value::as_i64).unwrap_or(commits.len() as i64);
+    let commits = commits
+        .iter()
+        .map(|c| {
+            let version = c.get("version").and_then(Value::as_i64).filter(|v| *v >= 1);
+            let committed_at = c.get("committed_at").and_then(Value::as_str);
+            match (version, committed_at) {
+                (Some(version), Some(at)) => Ok(HistoryCommit {
+                    version,
+                    committed_at: at.to_string(),
+                    summary: c.get("summary").cloned().unwrap_or(Value::Null),
+                }),
+                _ => bail!("a commit needs a positive `version` and a `committed_at` string: {c}"),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (pages, next_before) = match reply.get("next_before") {
+        None => (false, None),
+        Some(Value::Null) => (true, None),
+        Some(v) => match v.as_i64() {
+            Some(n) if n >= 1 => (true, Some(n)),
+            _ => bail!("`next_before` must be null or a positive version, not {v}"),
+        },
+    };
+    Ok(History { commits, limit, next_before, pages })
 }
 
 /// The fields a `StateSnapshot` carries. A reply with any other is refused.

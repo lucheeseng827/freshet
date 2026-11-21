@@ -9,10 +9,11 @@ edges.
 That second reader is the point. The planner core's design notes call the planner
 orchestrator-agnostic because consumers couple to the wire, not the linker, and a
 claim with one consumer is a dagron feature with extra words. Here the claim is
-checked mechanically: the tests are a port of dagron-state's, run against
-byte-identical fixtures, and an opt-in suite compiles every plan with the real
-`dagron-state` binary as well and requires the same task names, edges, commands and
-recorded facts.
+checked mechanically. The reader is [`freshet-plan`](../plan), whose tests are a port
+of dagron-state's, run against byte-identical fixtures, and which compiles every plan
+with the real `dagron-state` binary as well and requires the same task names, edges,
+commands and recorded facts. [`freshet-dagster`](../dagster) reads plans through it
+too, so a plan says the same things in all three orchestrators.
 
 ## Use it
 
@@ -46,11 +47,11 @@ pip install freshet-airflow              # into the environment that parses your
 pip install 'freshet-airflow[airflow]'   # a fresh environment, Airflow included
 ```
 
-The package declares no dependencies. It runs inside an Airflow deployment that has
-already pinned Airflow and its providers with a constraints file, and a hard
-dependency on `apache-airflow` would invite pip to re-resolve the scheduler's own
-install. `conn_id` also needs `apache-airflow-providers-common-sql` and the
-provider for your database.
+The package depends only on `freshet-plan`, which is standard library only. It runs
+inside an Airflow deployment that has already pinned Airflow and its providers with a
+constraints file, and a hard dependency on `apache-airflow` would invite pip to
+re-resolve the scheduler's own install. `conn_id` also needs
+`apache-airflow-providers-common-sql` and the provider for your database.
 
 ## What you get
 
@@ -69,7 +70,9 @@ explains the plan: how many models rebuild, why each one does, what each writes.
 
 Everything up to the operator constructors is decided without Airflow, by
 `plan_operators()`, which returns plain records. `import freshet_airflow` needs no
-Airflow at all; `build_dag()` imports it when called.
+Airflow at all; `build_dag()` imports it when called. The docs' words (the
+headline, why each model runs, what it writes, the warnings) are
+`freshet_plan.explain`'s, the same as in a Dagster job's descriptions.
 
 ## Edges
 
@@ -191,24 +194,20 @@ errors, and their order, are dagron-state's `CompileError`.
 ## Tests
 
 ```sh
-pip install -e '.[test]'
+pip install -e ../plan -e '.[test]'   # freshet-plan from beside it, until it is on PyPI
 pytest                    # the core suite needs no Airflow; the Airflow tests skip without it
 ```
 
 With Airflow and the common-sql provider installed, `tests/test_airflow.py` builds
 real DAGs and checks `upstream_task_ids`, operator types and fields, templating,
-and a serialization round trip. The whole suite, opt-in parts included, passes on
-Airflow 3.3.2 and on 2.11.2. Two suites are opt-in:
+and a serialization round trip. The whole suite, opt-in part included, passes on
+Airflow 3.3.2, which Freshet's CI pins and installs with Airflow's constraints file,
+and passed on 2.11.2. One suite is opt-in:
 
 ```sh
-# Compare every plan against the real dagron-state binary (DAGRON = a dagron checkout).
-cargo build --manifest-path "$DAGRON/Cargo.toml" -p dagron-state --no-default-features
-FRESHET_DAGRON_STATE_BIN="$DAGRON/target/debug/dagron-state" pytest tests/test_dagron_state_agreement.py
-
 # Run plans through `airflow dags test` (needs the sqlite provider; takes tens of seconds).
 FRESHET_AIRFLOW_E2E=1 pytest tests/test_airflow_end_to_end.py
 ```
 
-The fixtures in `tests/fixtures/` other than `handwritten_v4_sql.json` are
-byte-for-byte copies of dagron-state's, and a test fails if they drift. Do not edit
-one to make a test pass: if a contract test fails, the contract moved.
+The contract fixtures, and the comparison against the dagron-state binary, belong
+to [`freshet-plan`](../plan), whose tests run them; these tests read the same files.

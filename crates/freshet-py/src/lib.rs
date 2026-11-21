@@ -18,7 +18,7 @@
 //! freshet_planner.plan(request_json: str) -> str      # the wire response, verbatim
 //! freshet_planner.plan_dict(request: dict) -> dict    # parsed; raises PlannerError
 //! freshet_planner.PlannerError                        # .code, .message, .response
-//! freshet_planner.WIRE_CONTRACT_VERSION               # "planner-embed/5"
+//! freshet_planner.WIRE_CONTRACT_VERSION               # "planner-embed/6"
 //! ```
 //!
 //! The two entry points differ on purpose. `plan` is the cross-binding surface: it

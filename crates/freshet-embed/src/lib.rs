@@ -18,6 +18,8 @@
 //! freshet-core adds a `BackfillReason` variant, this crate fails to *compile* until the
 //! wire contract is updated, rather than silently dropping it.
 
+pub mod measured;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use freshet_api::{
@@ -26,7 +28,7 @@ use freshet_api::{
 };
 use freshet_core::{Model, Project};
 use freshet_incremental::{Grain, IncrementalConfig};
-use freshet_sql::{build_project, Catalog};
+use freshet_sql::{build_project, build_project_with, Catalog, Undeclared, UndeclaredTables};
 use freshet_state::{StateBackend, StateSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -44,10 +46,11 @@ use serde::{Deserialize, Serialize};
 /// * **4** — `sql`, the statements that perform it, when a dialect was asked for.
 /// * **5** — `cost.unpruned_millicu`, the baseline the rebuild work avoided is
 ///   measured against.
+/// * **6** — `cold`, on a plan made with no committed state to diff against.
 ///
 /// Bump it with any field or variant change, in the same commit as the consumers'
 /// golden fixtures.
-pub const WIRE_CONTRACT_VERSION: &str = "planner-embed/5";
+pub const WIRE_CONTRACT_VERSION: &str = "planner-embed/6";
 
 /// A request to plan a backfill. `models` + `sources` describe the project; the
 /// caller passes prior state IN (stateless bindings have nowhere to persist it).
@@ -119,6 +122,17 @@ pub struct PlanRequest {
     /// of them — running part of a plan rebuilds downstreams over stale upstreams.
     #[serde(default)]
     pub render: Option<RenderRequest>,
+    /// Refuse a table that is neither a model nor one of `sources`, rather than
+    /// plan it as an external table. A misspelled model (`from stgg` for `stg`) is
+    /// otherwise external: the model loses its edge and runs beside the one it reads.
+    ///
+    /// Opt-in like `include_cost`, because a project may read tables it never
+    /// declares; a caller that does not ask gets the bytes it got before the field
+    /// existed. The refusal is an `error` with code `undeclared_table` naming every
+    /// such table and the models and sources within one edit of it. `[]` in
+    /// `sources` declares a table without its columns.
+    #[serde(default)]
+    pub strict_refs: bool,
 }
 
 /// What `PlanRequest::render` asks for.
@@ -181,6 +195,19 @@ pub struct PlanResponse {
     /// for, so they can never disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headroom: Option<WireHeadroom>,
+    /// The plan was made with no committed state to diff against: a **cold plan**
+    /// (contract v6). Nothing says any model was built before, so every model is
+    /// `directly_changed` — the plan rebuilds the project, not a change to it.
+    ///
+    /// Said by the planner because only the planner knows it: from outside, a cold
+    /// plan and a change that really touched every model look the same. A consumer
+    /// that gates rebuilds (dagron-state's `auto_approve`) holds a cold plan for a
+    /// person by this, rather than by its size.
+    ///
+    /// Serialized only when true, so a warm plan's JSON is what it was under v5.
+    /// Never set on a restatement, which reads no state.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cold: bool,
 }
 
 /// One model in the plan: why it rebuilds, at what granularity, and what it must
@@ -377,7 +404,7 @@ pub fn to_wire(plan: &BackfillPlan, project: &Project, cfg: &IncrementalConfig) 
             WirePlanModel { name: name.clone(), reason, unit, depends_on, replace, sql: None }
         })
         .collect();
-    PlanResponse { models, next_state: None, error: None, cost: None, queue: None, headroom: None }
+    PlanResponse { models, next_state: None, error: None, cost: None, queue: None, headroom: None, cold: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -961,10 +988,17 @@ fn plan_edges(project: &Project, model: &str, in_plan: &BTreeSet<&str>) -> Vec<S
 pub fn plan(req: PlanRequest) -> anyhow::Result<PlanResponse> {
     let pairs: Vec<(String, String)> = req.models.iter().map(|m| (m.name.clone(), m.sql.clone())).collect();
     let hints = materialization_hints(&req.models)?;
-    let project = build_project_with_hints(&pairs, &req.sources, &hints)?;
+    let project = if req.strict_refs {
+        with_hints(build_project_with(&pairs, &req.sources, Undeclared::Refuse)?.project, &hints)
+    } else {
+        build_project_with_hints(&pairs, &req.sources, &hints)?
+    };
 
     // A restatement deliberately returns no snapshot: it rebuilds data, so it must not
     // advance the fingerprints that say which *code* has been built.
+    // Cold: a code-change plan with no fingerprints to diff against — no prior state,
+    // or an empty one. A restatement reads no state, so it is never cold.
+    let cold = req.restate.is_none() && !matches!(&req.prior_state, Some(s) if !s.fingerprints.is_empty());
     let (plan, next_state, redefined) = if let Some(r) = &req.restate {
         (plan_restatement(&project, &req.incremental, &r.model, r.partitions.clone())?, None, BTreeSet::new())
     } else {
@@ -1003,6 +1037,7 @@ pub fn plan(req: PlanRequest) -> anyhow::Result<PlanResponse> {
     // and it is on the response whether or not the caller asked for `cost`.
     let over_budget = resp.headroom.as_ref().is_some_and(|h| h.exceeded);
     resp.next_state = if over_budget { None } else { next_state };
+    resp.cold = cold;
 
     // Contract v4. A refused plan gets no SQL, for the reason it gets no commit
     // token: the models stay visible so the caller can scope the change down, but
@@ -1034,7 +1069,10 @@ pub fn plan_from_json(input: &str) -> String {
             // outermost frame. That difference is the whole error message for a user:
             // a bad statement reported "parsing model `m`" and stopped, when the
             // parser underneath had said exactly what was wrong and where.
-            Err(e) => err_response("plan_error", &format!("{e:#}")),
+            Err(e) => {
+                let code = if e.downcast_ref::<UndeclaredTables>().is_some() { "undeclared_table" } else { "plan_error" };
+                err_response(code, &format!("{e:#}"))
+            }
         },
         Err(e) => err_response("bad_request", &e.to_string()),
     };
@@ -1053,9 +1091,13 @@ pub fn build_project_with_hints(
     sources: &Catalog,
     hints: &BTreeMap<String, Materialization>,
 ) -> anyhow::Result<Project> {
-    let base = build_project(models, sources)?;
+    Ok(with_hints(build_project(models, sources)?, hints))
+}
+
+/// `base` with each hinted model's materialization overridden.
+pub fn with_hints(base: Project, hints: &BTreeMap<String, Materialization>) -> Project {
     if hints.is_empty() {
-        return Ok(base);
+        return base;
     }
     let rebuilt: Vec<Model> = base
         .names()
@@ -1067,7 +1109,7 @@ pub fn build_project_with_hints(
             m
         })
         .collect();
-    Ok(Project::from_models(rebuilt))
+    Project::from_models(rebuilt)
 }
 
 fn materialization_hints(models: &[WireModel]) -> anyhow::Result<BTreeMap<String, Materialization>> {
@@ -1099,6 +1141,7 @@ fn err_response(code: &str, message: &str) -> PlanResponse {
         // No headroom on a planning failure: there is no plan to have priced, so a
         // cap has nothing to say about it. `error` and `headroom` are never both set.
         headroom: None,
+        cold: false,
     }
 }
 
@@ -1155,6 +1198,37 @@ mod tests {
         let names: Vec<&str> = resp.models.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["stg", "mart_a"], "topo order, both cold");
         assert!(resp.next_state.is_some(), "code-change plan returns a snapshot to commit");
+        assert!(resp.cold, "no prior state: the plan says it is cold");
+    }
+
+    /// Contract v6. `cold` is on the wire only for a code-change plan made with no
+    /// fingerprints to diff against, so a warm plan's JSON is what it was under v5.
+    #[test]
+    fn a_plan_says_it_is_cold_only_when_it_had_no_state() {
+        let project = r#""sources": { "raw": ["a"] },
+            "models": [{"name": "stg", "sql": "select a from raw"}, {"name": "mart", "sql": "select a from stg"}]"#;
+        let json = |extra: &str| -> serde_json::Value {
+            serde_json::from_str(&plan_from_json(&format!("{{ {project}{extra} }}"))).unwrap()
+        };
+
+        let cold = json("");
+        assert_eq!(cold["cold"], true, "{cold}");
+        let empty = json(r#", "prior_state": {"fingerprints": {}}"#);
+        assert_eq!(empty["cold"], true, "an empty snapshot holds nothing to diff against: {empty}");
+
+        // Warm: plan against the state the cold plan would commit, after one change.
+        let state = cold["next_state"].to_string();
+        let warm: serde_json::Value = serde_json::from_str(&plan_from_json(&format!(
+            r#"{{ "sources": {{ "raw": ["a", "b"] }},
+                 "models": [{{"name": "stg", "sql": "select a, b from raw"}}, {{"name": "mart", "sql": "select a from stg"}}],
+                 "prior_state": {state} }}"#
+        )))
+        .unwrap();
+        assert!(warm.get("cold").is_none(), "a warm plan has no `cold` key at all: {warm}");
+        assert_eq!(warm["models"][0]["name"], "stg");
+
+        let restated = json(r#", "restate": {"model": "stg", "partitions": ["2026-06-20"]}"#);
+        assert!(restated.get("cold").is_none(), "a restatement reads no state: {restated}");
     }
 
     #[test]
@@ -1197,6 +1271,37 @@ mod tests {
             message.len() > "parsing model `m`".len(),
             "the parser's own diagnosis must survive to the wire, got: {message}"
         );
+    }
+
+    #[test]
+    fn a_misspelled_model_is_refused_only_when_asked() {
+        const STGG: &str = r#""sources":{"raw":["a"]},"models":[
+            {"name":"stg","sql":"select a from raw"},
+            {"name":"mart","sql":"select a from stgg"}]"#;
+        // Unasked, it is an external table, exactly as before the field existed.
+        let lenient = req(&format!("{{{STGG}}}"));
+        let mart = lenient.models.iter().find(|m| m.name == "mart").unwrap();
+        assert!(mart.depends_on.is_empty());
+
+        let s = plan_from_json(&format!(r#"{{{STGG},"strict_refs":true}}"#));
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["error"]["code"], "undeclared_table", "{s}");
+        let message = v["error"]["message"].as_str().unwrap();
+        assert!(message.contains("model `mart` reads `stgg`"), "{message}");
+        assert!(message.contains("did you mean `stg`?"), "{message}");
+        assert!(v["models"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn strict_refs_accepts_a_source_declared_without_columns_and_keeps_hints() {
+        let resp = req(r#"{"strict_refs":true,"sources":{"raw":[]},
+            "models":[
+                {"name":"stg","sql":"select a from raw","materialization":"incremental"},
+                {"name":"mart","sql":"select a from stg","materialization":"incremental"}],
+            "restate":{"model":"stg","partitions":["2026-06-20"]}}"#);
+        // Partition-scoped only if the hints reached the strictly built project.
+        let mart = resp.models.iter().find(|m| m.name == "mart").expect("mart in plan");
+        assert!(matches!(&mart.unit, WireUnit::Partitions(ps) if ps == &["2026-06-20"]), "{:?}", mart.unit);
     }
 
     #[test]

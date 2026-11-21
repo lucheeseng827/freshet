@@ -1,10 +1,10 @@
 # Freshet operations & troubleshooting
 
-Short, honest runbook. There is **no service to operate yet**: `freshet` is a
-one-shot CLI and `freshet-serve` is an in-process library (no binary, no
-listener — see [CONFIG.md](./CONFIG.md)). This page covers the two stateful
-things that exist — the CLI's state file and an embedded `ProjectCache` — plus
-symptom-first troubleshooting for both.
+Short, honest runbook. `freshet` is a one-shot CLI; `freshet-serve` is the same
+`ProjectCache` either embedded in-process or as a daemon over HTTP (flags, the
+`FRESHET_SERVE_TOKEN` bearer token and `--watch` in [CONFIG.md](./CONFIG.md)). This
+page covers the stateful things — the CLI's state file, a `ProjectCache`, and a
+`freshet-state-server`'s directory — plus symptom-first troubleshooting.
 
 ## CLI (`freshet`) — state & recovery
 
@@ -30,11 +30,54 @@ symptom-first troubleshooting for both.
   settled by `--commit` after it).
 - **Hosted state** (`--state https://…`, token in `FRESHET_STATE_TOKEN`) is the
   same document kept by a server, versioned, and committed by compare-and-swap.
-  Nothing to back up on your side. Every run that reads it prints the version it
+  The server's directory is what to back up (below). Every run that reads it prints the version it
   planned against; pass that version to the later commit with `--expect-version`,
   so a commit that landed while your plan ran is caught rather than overwritten.
   Exit **3** means exactly that happened: re-plan (just run freshet again) and
   commit what the new plan rebuilt. Retrying the same commit keeps failing, correctly.
+
+## Hosted state server (`freshet-state-server`) — runbook
+
+- **One process per directory.** It locks `<dir>/.lock`; a second server on the same
+  directory refuses to start, because two would each accept a commit against the
+  same version. Scale by giving each server its own directory, not by sharing one.
+- **Backups**: stop the server, then copy the directory; or take an atomic snapshot of
+  the filesystem it is on. A copy made while it serves can be unusable: it may pick up
+  a commit file and miss the snapshot written just before it, and a server restored
+  from it refuses to load that state.
+- **Restoring an older version**: every kept commit keeps its snapshot
+  (`<version>.snapshot.json`). Restore one by committing it again, as a new version
+  against the current one, so every job that planned against the current version
+  sees its commit refused and re-plans:
+
+  ```sh
+  URL=https://state.example.com/v1/analytics; AUTH="Authorization: Bearer $FRESHET_STATE_TOKEN"
+  v=$(curl -s -H "$AUTH" "$URL/current" | jq .version)
+  # The snapshot is spliced in as text: a JSON tool that parses it may round its u64s.
+  printf '{"expected_version":%s,"snapshot":%s,"summary":{"restored_from":5}}' \
+    "$v" "$(cat /var/lib/freshet/analytics/5.snapshot.json)" |
+    curl -s -H "$AUTH" -H 'Content-Type: application/json' --data-binary @- "$URL/commit"
+  ```
+
+  `freshet plan --state 5.snapshot.json` shows what that version would plan, and changes
+  nothing anywhere. **Never delete a newer `.commit.json`** to roll back: the next commit
+  would take its version number again, and a job that planned against the deleted
+  commit would pass the compare-and-swap and commit over the restore.
+- **Retention** (`--keep`, default 100) deletes a state's oldest commits as new ones
+  land. History then ends at the oldest kept, and `freshet history` says so.
+- **Tokens**: `FRESHET_STATE_SERVER_TOKEN` reads and commits; give CI jobs that only
+  plan `FRESHET_STATE_SERVER_READ_TOKEN`, which cannot commit. Rotating either is a
+  restart with the new value. It speaks plain HTTP: put TLS in front of it.
+- **The console** (`--console apps/freshet-console`; on in the image) is at
+  `/console/`. It lists every state, each one's commits and its snapshot, and downloads
+  any kept version as the exact `state.json`. It only reads: sign in with
+  `FRESHET_STATE_SERVER_READ_TOKEN`, which is all it needs. Its files are public; what
+  they read is behind the token. Turn it off by leaving `--console` unset (in the
+  image, `FRESHET_STATE_SERVER_CONSOLE=`).
+- **A crash** loses at most the commit in flight, whose client then sees an error
+  rather than a version, re-plans, and commits again. An orphaned
+  `<version>.snapshot.json` with no `.commit.json` beside it is that commit's
+  leftover, and the next commit overwrites it.
 
 ## Embedded daemon (`freshet_serve::ProjectCache`) — runbook
 
@@ -47,8 +90,9 @@ symptom-first troubleshooting for both.
   yourself (e.g. mirror commits into a freshet-state `FileStateBackend`).
 - **Restart semantics:** construct a fresh `ProjectCache`, `reload` the
   project, re-plan. All previously issued tokens are gone (they were memory).
-- **Stale tokens:** a `reload` that changes the project or the incremental config
-  bumps the revision and invalidates every outstanding token — `commit` then
+- **Stale tokens:** a `reload` (a request, or a `--watch` reload after an edit) that
+  changes the project or the incremental config bumps the revision and invalidates
+  every outstanding token — `commit` then
   returns the `stale plan` error and the caller must re-plan. A `reload` that
   changes nothing keeps the revision and the tokens. A staged plan is also
   evicted after 24 h uncommitted (`expired plan`) or when 64 newer plans push it
@@ -65,8 +109,12 @@ symptom-first troubleshooting for both.
 |---|---|---|
 | CLI: `nothing to backfill — state is up to date.` | No fingerprint changed vs the committed state | Expected. Delete the state file (or point `--state` elsewhere) to force a full plan. |
 | CLI exits **3**: `hosted state at … moved: … another commit landed after this plan was computed; re-plan` | Another job committed hosted state after this plan was computed (or `--expect-version` names a version the state has moved past) | Re-plan: run freshet again, execute what the new plan says, commit with the version it printed. Nothing was written. |
-| CLI: `--state … is hosted state: set FRESHET_STATE_TOKEN …` / `… refused (HTTP 401)` | No token, or the token is unknown/revoked | Export a workspace API token as `FRESHET_STATE_TOKEN`. It is never read from a flag or the URL. |
-| CLI: `… refused the commit (HTTP 403): token lacks the state:commit scope` | A scoped token without the commit capability (it can still read) | Use a token whose scopes include `state:commit`, or an unrestricted one. |
+| CLI: `--state … is hosted state: set FRESHET_STATE_TOKEN …` / `… refused (HTTP 401)` | No token, or not the server's | Export the server's `FRESHET_STATE_SERVER_TOKEN` (or, to plan only, its read token) as `FRESHET_STATE_TOKEN`. It is never read from a flag or the URL. |
+| CLI: `… refused the commit (HTTP 403): this token may read state but not commit it` | The server's read-only token (it can still plan and list history) | Commit with the server's `FRESHET_STATE_SERVER_TOKEN`. |
+| CLI: `… does not page its history: it ignored --before N` | The server answers history without a `next_before` cursor | List without `--before`; the server can show only its newest page. |
+| Server exits: `--console (or FRESHET_STATE_SERVER_CONSOLE)` … `has no index.html` | `--console` names a directory that is not the console | Point it at `apps/freshet-console` (in the image, `/usr/share/freshet/console`), or leave it unset. |
+| Console: "That is not a token this server accepts" | The token pasted is neither of the server's | Paste `FRESHET_STATE_SERVER_READ_TOKEN`'s value. A server restarted with new tokens signs every open console out. |
+| Server: `another freshet-state-server is serving <dir>` | A second server was started on a directory one already serves | Stop one, or give it its own `--dir`. Two on one directory could each accept a commit against the same version. |
 | CLI: `hosted state carries field(s) [...] this freshet does not understand` | The server stores state a newer freshet wrote | Upgrade freshet. Planning without those fields, then committing, would drop them. |
 | CLI: `… refused the plan (HTTP 400): options.command_template is required` | `submit` reached the consumer, which needs a per-model command | Pass `--command '<shell>'`, or supply the key via `--options-file`. The message is the consumer's own — freshet does not validate `options`. |
 | CLI: `… refused the plan (HTTP 422)` | The consumer treats an empty plan as unprocessable | Should not happen from `submit`, which short-circuits an empty plan locally. If it does, the plan was non-empty here and empty there — check that `--project` and `--state` point where you think. |

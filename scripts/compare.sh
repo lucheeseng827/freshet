@@ -104,11 +104,14 @@ wanted() { [[ -z $ONLY || ,$ONLY, == *,$1,* ]]; }
 
 # --- build -------------------------------------------------------------------------
 log "building freshet, freshet-serve (http) and the freshet-bench tools (release)"
+# --locked: the binaries measured are built from the committed lock file, and a
+# cargo that would rewrite it cannot leave the tree dirty after `provenance` has
+# recorded it clean.
 (
     cd -- "$MODULE"
-    cargo build --quiet --release -p freshet-cli --bin freshet
-    cargo build --quiet --release -p freshet-bench --bins
-    cargo build --quiet --release -p freshet-serve --features http --bin freshet-serve
+    cargo build --quiet --locked --release -p freshet-cli --bin freshet
+    cargo build --quiet --locked --release -p freshet-bench --bins
+    cargo build --quiet --locked --release -p freshet-serve --features http --bin freshet-serve
 )
 FRESHET=$TARGET/release/freshet
 SERVE=$TARGET/release/freshet-serve
@@ -345,7 +348,7 @@ run_freshet() {
     [[ -n $token ]] || die "freshet-serve: no commit token from the first plan"
     "$CURL" -sS -X POST "$url/rpc" -d "{\"op\":\"commit\",\"token\":$token}" > /dev/null
     measure serve.replan-nochange "$T_SERVE" "WARM: daemon replan, nothing changed (0)" \
-        "A whole curl process against a running freshet-serve that parsed the project once at start-up (untimed; the same load the freshet graph row times) and holds it in memory: loopback HTTP + the daemon's plan (AST-canonical re-fingerprint of all N models, which re-parses each one's SQL; diff against the committed in-memory snapshot) + the JSON reply. The CPU column covers the curl process only: the daemon is not its child, so the daemon's own work lands in this row's other-process CPU instead. A long-running daemon is a different architecture from the other tools' per-invocation caches; this is Freshet's warm path, not a like-for-like process." \
+        "A whole curl process against a running freshet-serve that parsed the project once at start-up (untimed; the same load the freshet graph row times) and holds it in memory: loopback HTTP + the daemon's plan (AST-canonical fingerprints of all N models, each from the SQL half the daemon cached for that model's SQL text and the model's columns and dependencies as they are now, so no SQL is parsed when none changed; diff against the committed in-memory snapshot) + the JSON reply. The CPU column covers the curl process only: the daemon is not its child, so the daemon's own work lands in this row's other-process CPU instead. A long-running daemon is a different architecture from the other tools' per-invocation caches; this is Freshet's warm path, not a like-for-like process." \
         "" -- "$CURL" -sS -X POST "http://127.0.0.1:$port/rpc" -d '{"op":"plan"}'
     local n
     n=$({ grep -o '"name"' "$RUN/out/serve.replan-nochange.stdout" || true; } | wc -l | tr -d ' ')
@@ -486,11 +489,17 @@ for size in "${SIZE_LIST[@]}"; do
     RUN=$WORK/run-${L}x${W}
     [[ ! -e $RUN ]] || die "$RUN already exists; pass a fresh --work"
     mkdir -p -- "$RUN/out"
-    "$EXPORT" --layers "$L" --width "$W" --cols "$COLS" --seed "$SEED" --out "$RUN/base" > "$RUN/export.json"
-    "$EXPORT" --layers "$L" --width "$W" --cols "$COLS" --seed "$SEED" --edit "$EDIT" --out "$RUN/edit" > "$RUN/export-edit.json"
+    # Only the formats a selected tool reads: at 100,000 models every format is
+    # another 200,000 files on disk.
+    FORMAT=all
+    wanted dbt-core || wanted dbt-oss || wanted sqlmesh || FORMAT=freshet
+    "$EXPORT" --layers "$L" --width "$W" --cols "$COLS" --seed "$SEED" --format "$FORMAT" --out "$RUN/base" > "$RUN/export.json"
+    "$EXPORT" --layers "$L" --width "$W" --cols "$COLS" --seed "$SEED" --format "$FORMAT" --edit "$EDIT" --out "$RUN/edit" > "$RUN/export-edit.json"
     # Each dbt engine gets its own copy so neither ever sees the other's target/.
-    cp -R -- "$RUN/base/dbt" "$RUN/base/dbt-oss"
-    cp -R -- "$RUN/edit/dbt" "$RUN/edit/dbt-oss"
+    if [[ $FORMAT == all ]]; then
+        cp -R -- "$RUN/base/dbt" "$RUN/base/dbt-oss"
+        cp -R -- "$RUN/edit/dbt" "$RUN/edit/dbt-oss"
+    fi
     N=$(sed -n 's/^  "models": \([0-9]*\),$/\1/p' "$RUN/export.json")
     K=$(sed -n 's/^    "closure": \([0-9]*\)$/\1/p' "$RUN/export-edit.json")
     [[ -n $N && -n $K ]] || die "could not read the model count / edit closure from the export summaries"

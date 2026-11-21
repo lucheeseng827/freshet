@@ -280,12 +280,12 @@ impl BackfillPlan {
 /// > SaaS tenant. `Hosted` states the mechanism — the embedder supplies the compute —
 /// > and leaves the commercial framing to whoever is doing the selling. Mechanical
 /// > rename: no serde derive, so no wire or config carried the old spelling, and the
-/// > crate is unpublished (ADR-0001), so there were no external dependents.
+/// > crate was unpublished, so there were no external dependents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ComputeMode {
     // Fail-safe default: a local user with a FileStateBackend isn't paying anyone to
-    // run their compute, and a control-plane wiring bug should never silently start
-    // metering a tenant by CU.
+    // run their compute, and an embedder's wiring bug should never silently start
+    // metering a user by CU.
     #[default]
     Byo,
     Hosted,
@@ -457,7 +457,7 @@ pub fn estimate_compute_units(
 /// `--full-refresh -s changed+`, priced by the same [`CostModel`].
 ///
 /// The gap to [`estimate_compute_units`] of the plan is the rebuild work the planner
-/// avoided — the product's north-star metric (`docs/PRODUCT_ROADMAP.md` §7) — and
+/// avoided, the figure every plan reports, and
 /// [`avoided_compute_units`] computes it. Model-level and column-level pruning only
 /// ever shrink the plan below this baseline. Partition scoping usually does too, but
 /// not always: under the default weights more than ten partitions of an incremental
@@ -1125,8 +1125,8 @@ mod tests {
 
     #[test]
     fn compute_mode_default_is_byo() {
-        // OSS default must be BYO: a local user with FileStateBackend is not
-        // running on our infra and must not be billed by accident.
+        // The default must be BYO: a local user with FileStateBackend runs on
+        // their own compute, and nothing should meter it by accident.
         assert_eq!(ComputeMode::default(), ComputeMode::Byo);
     }
 }

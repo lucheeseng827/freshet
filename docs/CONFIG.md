@@ -21,7 +21,8 @@ subcommand in `--help`, and refuses a `--state` URL by name.
 | Command | Flag | Type | Default | What it does |
 |---|---|---|---|---|
 | all | `--project <dir>` | path | `.` | The project directory to load: every `*.sql` file is a model (model name = file stem), plus the two optional JSON files below. |
-| `plan` | `--state <file\|URL>` | path or URL | `.planner/state.json` | Where committed state lives: a freshet-state `FileStateBackend` snapshot file (missing = empty prior state, a cold plan), or an `http(s)://` **hosted state** API such as dagron Cloud's `https://<edge>/state/v1`, authenticated with `FRESHET_STATE_TOKEN`. Against hosted state, the version planned against is printed on stderr. See [State](#state-a-file-or-hosted-state). |
+| all | `--strict-refs` | switch | off | Refuse a table that is neither a model nor declared in `sources.json`, naming every one and the models and sources one edit from it (``model `mart` reads `stgg`, which is neither a model nor a declared source: did you mean `stg`?``); exit **1**, nothing printed on stdout, nothing committed. Without it such a table is planned as external — read, never a dependency — as it always was, so a misspelled model silently loses its edge; only a table one edit from a model or source is warned about, on stderr. **Turn it on in CI.** Accepted before or after the subcommand. |
+| `plan` | `--state <file\|URL>` | path or URL | `.planner/state.json` | Where committed state lives: a freshet-state `FileStateBackend` snapshot file (missing = empty prior state, a cold plan), or an `http(s)://` **hosted state** API such as a [`freshet-state-server`](#freshet-state-server-hosted-state-you-run)'s `https://<host>/v1/<name>`, authenticated with `FRESHET_STATE_TOKEN`. Against hosted state, the version planned against is printed on stderr. See [State](#state-a-file-or-hosted-state). |
 | `plan` | `--commit` | switch | off | Persist the new snapshot after planning. **Do this only after the plan actually ran** — state must advance only on success (the planner core's discipline). Against hosted state this is a compare-and-swap: if another commit landed after this plan was computed, nothing is written and the exit status is **3**. |
 | `plan` | `--expect-version <N\|none>` | version | none | Hosted state, with `--commit`: commit only if the state is still at version `N` (`none`: it had never committed) — the version the plan that ran was computed against, which the planning run printed. Otherwise exit **3** without writing. Carries the compare-and-swap across plan → run elsewhere → commit; without it the commit compares against the version it loads itself. A file `--state` refuses it (a file is last-writer-wins). |
 | `plan` | `--json` | switch | off | Emit the wire `PlanResponse` (via `to_wire`) instead of the human table. |
@@ -37,6 +38,13 @@ subcommand in `--help`, and refuses a `--state` URL by name.
 | `restate` | `--expect-version <N\|none>` | version | none | Requires `--state` (hosted): write the ledger only if the state is still at `N`. After recording, `restate` prints the version to settle against. |
 | `fingerprint` | — | | | Print each model's AST-canonical fingerprint and its scheme (`AstV2`, or `Text` for SQL that failed to parse — fallbacks are listed on stderr). State written under an older scheme is reconciled, not rebuilt: a model whose fingerprint differs only in spelling is re-keyed on the next commit. |
 | `graph` | — | | | Print the models in topological order; exits non-zero naming the cycle if there is one. |
+| `cost record` | `--model <M> --value <X>` | name, number | required | Record what one run of model `M` cost, in `costs.json`'s unit. The model must exist (`M.sql`). The last 20 runs of each kind are kept. |
+| `cost record` | `--partitions <N>` | integer | none | A partition-scoped run of `N` partitions, kept as its cost per partition. Omit for a whole rebuild. |
+| `cost record` | `--unit <U>` | text | none | The unit (`seconds`, `credits`, `bytes`, …): required for the first run recorded, and must match it afterwards. One file holds one unit; Freshet converts nothing. |
+| `history` | `--state <URL>` | URL | required | List hosted state's commits, newest first: each one's version, time, the models it changed and removed and the ledgers it moved (the server's diff), and the committer's context. A state file keeps no history and is refused, saying so. |
+| `history` | `--limit <N>` | integer | 20 | The most commits to list. The server caps a page (`freshet-state-server`: 100). When older commits are kept, the output ends with the command for the next page; when the server no longer keeps them, it says so. |
+| `history` | `--before <V>` | version | none | Only commits older than version `V`: the next page, as the previous one names it. Refused against a server that does not page (it would answer with its newest commits again). |
+| `history` | `--json` | switch | off | The commits as JSON — `{"commits": [{"version", "committed_at", "summary"}], "limit", "next_before"}` — as the server sent them. |
 | `submit` | `--state <file\|URL>` | path or URL | `.planner/state.json` | As `plan`, read only. The plan is computed exactly as `plan` computes it — same helper, so the two can never disagree — and carries its own CU estimate (`plan.cost`, the effort map at the default rate card) for a consumer that meters it. Against hosted state, the "once it has run, commit with" hint names `--expect-version`. |
 | `submit` | `--to <URL>` | string | **required** unless `--dry-run` | The consumer's submit endpoint, in full. No default: freshet does not know who consumes its plans or where they mounted the route. |
 | `submit` | `--command <SHELL>` | string | none | Shorthand for `options.command_template = ["sh","-c",<SHELL>]`. The shell string is forwarded byte-for-byte — placeholders like `{{ model }}` are the consumer's templating, not freshet's. |
@@ -118,7 +126,8 @@ Read by `load_project` (`freshet-cli/src/main.rs`):
 | File | Required | Shape | What it does |
 |---|---|---|---|
 | `*.sql` | ≥ 1 | one model per file | The model's SQL; the file stem is the model name. |
-| `sources.json` | no | `{"raw": ["a","b"]}` | Source-table schemas for wildcard expansion / unqualified-ref resolution (freshet-sql's `Catalog`). |
+| `sources.json` | no | `{"raw": ["a","b"], "events": []}` | Source-table schemas for wildcard expansion / unqualified-ref resolution (freshet-sql's `Catalog`). Declaring a table is also what makes it external under `--strict-refs`; `[]` declares it without its columns, which are then unknown (`*` over it is refused, never expanded to nothing). |
+| `costs.json` | no | `{"unit": "seconds", "models": {"stg": {"full": [12.4], "partition": [0.8]}}}` | What the team's own runs cost, written by `freshet cost record`, never sent anywhere. With it, `plan` and `restate` print a measured estimate beside the rate card: each model at the median of its own runs (a whole rebuild, or per partition times the partitions planned), the rest extrapolated at the project's measured rate per CU, and the share that was measured stated. `--json` does not carry it. |
 | `materializations.json` | no | `{"stg": "incremental"}` | Materialization hints per model: `table` \| `view` \| `incremental` (case-insensitive; anything else is an error). Without a hint everything defaults to `table` and **nothing is partition-scopable**. |
 
 ### `incremental.json` (optional) — partitions and replace declarations
@@ -209,17 +218,18 @@ test suite; Snowflake, BigQuery and Databricks are syntax-checked by `sqlparser`
 a full cold plan. Last-writer-wins: two jobs that commit at once both succeed, and
 the second silently replaces the first.
 
-**Hosted state** — any `http://` or `https://` URL, e.g. dagron Cloud's
-`https://<edge>/state/v1`. The token comes from **`FRESHET_STATE_TOKEN`** and
+**Hosted state** — any `http://` or `https://` URL, e.g. a `freshet-state-server`'s
+`https://<host>/v1/<name>`. The token comes from **`FRESHET_STATE_TOKEN`** and
 nowhere else: not a flag (shell history, `ps`), not the URL (a URL with
 `user:pass@` is refused, without echoing it). Plain `http://` to a non-loopback host
-works but warns that the token crosses the network unencrypted. The protocol is two
-calls, both answered for the token's own workspace:
+works but warns that the token crosses the network unencrypted. The protocol is three
+calls, all answered for the token's own workspace:
 
 | Call | Answer |
 |---|---|
 | `GET <url>/current` | `200 {"version": int\|null, "snapshot": {...}}` — `null` before the first commit |
 | `POST <url>/commit` `{"expected_version": int\|null, "snapshot": {...}, "summary": {...}}` | `200 {"version": N}` · `409 {"error", "expected", "found"}` |
+| `GET <url>/history?limit=N[&before=V]` | `200 {"commits": [{"version", "committed_at", "summary"}], "limit": N, "next_before": V\|null}`, newest first — read by `freshet history` |
 
 Every run that reads hosted state prints the version it planned against on stderr
 (`hosted state: version 7 at …`). Every commit — `plan --commit`, and both of
@@ -232,14 +242,14 @@ commit that would change nothing is **not sent** (`state unchanged: … nothing 
 commit`, exit 0): it would record nothing, and moving the version would make every
 other writer pinned to the current one conflict and re-run its plan. The
 `summary` freshet sends is small context — `{"client": "freshet/<version>",
-"command": "plan --commit", "models_rebuilt": N}` — which dagron Cloud keeps beside
-its own server-computed record of what the commit changed.
+"command": "plan --commit", "models_rebuilt": N}` — which the server keeps beside its
+own record of what the commit changed.
 
 **The mapping is the identity, and it is lossless or refused.** A state file's
 content *is* a `StateSnapshot`, and so is what hosted state stores:
 
-* fingerprints are u64s and cross JSON exactly (both ends use serde_json; the
-  Postgres store keeps them as `numeric`, bit-exact);
+* fingerprints are u64s and cross JSON exactly (both ends use serde_json, and
+  `freshet-state-server` stores each snapshot as the JSON it received);
 * each watermark is a model's partition ledger — a JSON document (`{"v":2,
   "grain":…, "built":…, "pending":…}`) kept as a *string* — opaque in transit and at
   rest;
@@ -249,16 +259,42 @@ content *is* a `StateSnapshot`, and so is what hosted state stores:
 
 A hosted reply carrying a field this freshet has no slot for is **refused** (exit 1,
 "upgrade freshet") rather than planned against — planning without it and then
-committing would drop it for good. dagron Cloud refuses the mirror image, a commit
-whose snapshot it could not store whole. The v2 AST-canonical fingerprinter writes
+committing would drop it for good. `freshet-state-server` refuses the mirror image, a
+commit whose snapshot it could not store whole, with a 422. The v2 AST-canonical fingerprinter writes
 the same `BTreeMap<String, u64>` shape v1 does, so a v1-written state still loads (a
 changed hashing scheme is re-keyed on the next commit, not rebuilt).
 
+## `freshet-state-server`: hosted state you run
+
+Hosted state for a team, kept in one directory: a state per project, created by its
+first commit, compare-and-swap commits, and a history of what each commit changed.
+`--state https://<host>/v1/<name>` names one. No config file; two environment
+variables and the rest are flags:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--dir <DIR>` | required | Where states are kept, a subdirectory each. Created if missing. One server per directory: a second one on it refuses to start, since two would each accept a commit against the same version. |
+| `--keep <N>` | `100` | The commits each state keeps. Older ones, and their snapshots, are deleted as new ones land; `freshet history` then says so. Versions keep counting. |
+| `--port <N>` | `8790` | TCP port. `0` takes a free one; the startup line says which. |
+| `--host <ADDR>` | `127.0.0.1` | Bind address. Anything but loopback without a token prints a warning that anyone who can reach it can read and commit every state. |
+| `FRESHET_STATE_SERVER_TOKEN` (env) | unset | The bearer token that may read and commit. Unset, with the read token unset too, the server answers anyone. Set but empty is a startup error. Clients send it as `FRESHET_STATE_TOKEN`. |
+| `FRESHET_STATE_SERVER_READ_TOKEN` (env) | unset | A token that may read state and history but not commit (a 403): for jobs that only plan. Needs the commit token set, and must differ from it. |
+| `--console <DIR>` | unset | Serve the console (`apps/freshet-console`) from this directory at `/console/`, and send `/` there. Read-only; it signs in with either token. A directory that is missing or has no `index.html` is a startup error. |
+| `FRESHET_STATE_SERVER_CONSOLE` (env) | unset | `--console` when the flag is not given. The image sets it to its own copy of the console; set it empty to turn the console off. |
+
+On disk each commit is two files, `<version>.snapshot.json` (the snapshot, as
+received) and `<version>.commit.json` (its version, time and summary), written in
+that order to temporary names, synced, and renamed. A version exists if and only if
+its `.commit.json` does, so a crash loses at most the commit in flight. Back it up by
+copying the directory with the server stopped, or by an atomic filesystem snapshot
+([OPERATIONS.md](./OPERATIONS.md) has the restore). It is plain HTTP: terminate TLS in front of it when the token
+crosses a network. `GET /healthz` is open, for liveness probes.
+
 ## `freshet-serve`: the daemon
 
-Built with the `http` feature (`cargo build --release -p freshet-serve --features
-http`; the release binaries and the `mancube/freshet` image include it). No config
-file and no environment variables; everything is a flag:
+Built with the `http` feature, and `watch` for `--watch` (`cargo build --release -p
+freshet-serve --features http,watch`; the `mancube/freshet` image has both). No
+config file; one environment variable, `FRESHET_SERVE_TOKEN`, and the rest are flags:
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -267,13 +303,15 @@ file and no environment variables; everything is a flag:
 | `--materializations <FILE>` | none | Materialization hints, as `materializations.json` above. Only `incremental` models are partition-scopable. |
 | `--incremental <FILE>` | none | Per-model incremental declarations; the daemon reads the `replace` half. |
 | `--port <N>` | `8788` | TCP port. |
-| `--host <ADDR>` | `127.0.0.1` | Bind address. There is **no authentication** in this version, so anything but loopback prints a warning; put it behind your own proxy or network policy. |
+| `--host <ADDR>` | `127.0.0.1` | Bind address. Anything but loopback without `FRESHET_SERVE_TOKEN` prints a warning that anyone who can reach it can use it. |
+| `--watch` | off | Needs `--project`. Reload from disk whenever its `.sql` files, or the `--sources` / `--materializations` / `--incremental` files, change and then stay quiet for 250 ms. A watched reload is a `reload`: it reparses only what changed, a failed one (SQL caught mid-edit) keeps the previous project serving and says so on stderr, and a plan staged before an edit a plan would see can no longer commit. Through a Docker bind mount it relies on the host forwarding file events (Linux does; Docker Desktop's mounts may not). |
+| `FRESHET_SERVE_TOKEN` (env) | unset | A bearer token. Set, `POST /rpc` answers only requests carrying `Authorization: Bearer <token>` (compared in constant time) and refuses the rest with a 401 and a JSON error body; `GET /healthz` stays open for liveness probes and reveals only the revision. Set but empty is a startup error. It is plain HTTP: terminate TLS in front of the daemon when the token crosses a network. |
 
 Two routes: `POST /rpc` takes one request object (`{"op":"plan"}`, `restate`,
 `graph`, `commit`, `reload` — see [API.md](./API.md)) and `GET /healthz`. The daemon
-does not watch the filesystem (`reload` is explicit, so a plan's commit token is
-never invalidated under a client), does not render SQL (use the CLI's `--sql`), and
-holds its committed state in memory.
+reloads only when asked — a `reload` request, or `--watch` — does not render SQL
+(use the CLI's `--sql`), and holds its committed state in memory. There is no gRPC
+transport, by decision.
 
 ## `freshet-cli` feature gates
 

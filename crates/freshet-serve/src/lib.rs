@@ -6,8 +6,11 @@
 //! [`ProjectCache::handle`] (and [`ProjectCache::handle_json`]) request loop. The
 //! default lane is **serde-only and transport-free**; the `http` feature adds an
 //! axum daemon ([`http`]) over that same funnel, so the in-process and networked
-//! lanes cannot answer differently. gRPC and file-watch remain off-by-default
-//! roadmap features.
+//! lanes cannot answer differently. With a token, that daemon answers `/rpc` only
+//! for a request that carries it ([`http::TOKEN_ENV`]). The `watch` feature reloads
+//! a project from disk when its files change ([`watch`]). There is no gRPC transport,
+//! by decision: HTTP and JSON are the funnel every binding shares, and nothing that
+//! consumes the planner asked for another.
 //!
 //! ## Incremental reparse
 //!
@@ -54,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use freshet_core::{plan_backfill, CostModel, Materialization, Project};
 use freshet_embed::{to_wire_with_estimate, PlanResponse};
-use freshet_fingerprint::AstFingerprinter;
+use freshet_fingerprint::{AstFingerprinter, SqlHash};
 use freshet_incremental::IncrementalConfig;
 use freshet_sql::Catalog;
 use freshet_state::{changed_models, MemoryStateBackend, StateSnapshot};
@@ -199,6 +202,10 @@ struct CacheState {
     /// What `project` was built from, for the next reload to reparse against. `None`
     /// until the first successful reload.
     built: Option<Arc<Built>>,
+    /// The SQL half of each model's fingerprint, beside the SQL it was hashed from
+    /// ([`fingerprints`]): seeded by a full reload from the trees it parsed anyway,
+    /// topped up by a plan for a model whose SQL it has not seen.
+    sql_hashes: BTreeMap<String, (String, SqlHash)>,
 }
 
 impl CacheState {
@@ -265,6 +272,7 @@ impl ProjectCache {
                 evicted: BTreeMap::new(),
                 next_token: 0,
                 built: None,
+                sql_hashes: BTreeMap::new(),
             }),
             clock,
             staged_plan_ttl: DEFAULT_STAGED_PLAN_TTL,
@@ -292,7 +300,8 @@ impl ProjectCache {
         }
     }
 
-    /// Transport-agnostic JSON dispatch (the future HTTP/gRPC layers call this).
+    /// Transport-agnostic JSON dispatch: what the HTTP layer calls, and what an
+    /// embedder with its own transport calls.
     pub fn handle_json(&self, input: &str) -> String {
         let resp = match serde_json::from_str::<Request>(input) {
             Ok(req) => self.handle(req),
@@ -357,6 +366,13 @@ impl ProjectCache {
         } else {
             plan_state_differs(&st.project, &st.incremental, &project, &incremental)
         };
+        // Keyed by the SQL they were hashed from, so a hash from any reload is exact for
+        // any project — this one, or one another reload swaps in after it.
+        for (name, hash) in outcome.sql_hashes {
+            if let Some(m) = project.get(&name) {
+                st.sql_hashes.insert(name, (m.sql.clone(), hash));
+            }
+        }
         st.project = project;
         st.built = Some(Arc::new(outcome.built));
         st.incremental = incremental;
@@ -376,9 +392,11 @@ impl ProjectCache {
     }
 
     fn plan(&self, include_cost: bool, include_queue: bool) -> Response {
-        let mut st = self.inner.write().unwrap();
-        // v2 AST-canonical fingerprints (drop-in for freshet_state::fingerprint_project).
-        let current = AstFingerprinter::new().fingerprint_project(&st.project);
+        let mut guard = self.inner.write().unwrap();
+        let st = &mut *guard;
+        // v2 AST-canonical fingerprints (drop-in for freshet_state::fingerprint_project),
+        // parsing only SQL the cache has not hashed before.
+        let current = fingerprints(&st.project, &mut st.sql_hashes);
         let changed = changed_models(&st.snapshot, &current);
 
         let mut cols: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -403,7 +421,7 @@ impl ProjectCache {
         }
         st.staged.insert(token, StagedPlan { revision, snapshot: next, staged_at: now });
 
-        let wire = to_wire_with_estimate(
+        let mut wire = to_wire_with_estimate(
             &st.project,
             &plan,
             &st.incremental,
@@ -411,6 +429,9 @@ impl ProjectCache {
             include_cost,
             include_queue,
         );
+        // Contract v6: planned against no committed fingerprints — a daemon that has
+        // never had a plan committed, or was started with an empty snapshot.
+        wire.cold = st.snapshot.fingerprints.is_empty();
         Response::Plan { revision, token: Some(token), plan: Box::new(wire) }
     }
 
@@ -490,6 +511,34 @@ impl ProjectCache {
 /// Whether a plan computed from one state could differ from one computed from the
 /// other: the project (every field of every model) and the incremental config are
 /// everything `plan` and `restate` read.
+/// Each model's AST fingerprint — exactly `AstFingerprinter::new().fingerprint_project`
+/// — parsing only a model whose SQL `cache` holds no hash for.
+///
+/// Exact by construction rather than by invalidation: a model's SQL half is a function
+/// of its SQL text alone, so a cached half is used only beside the very text it was
+/// hashed from, and the rest of the fingerprint — the column names and dependencies,
+/// which a reload can change without touching a model's SQL — is hashed from the model
+/// as it is now, every time. Without the cache, a plan parsed every model: 3.3 s of a
+/// replan at 100,000 models, under the write lock.
+fn fingerprints(project: &Project, cache: &mut BTreeMap<String, (String, SqlHash)>) -> BTreeMap<String, u64> {
+    let fp = AstFingerprinter::new();
+    cache.retain(|name, _| project.get(name).is_some());
+    let mut out = BTreeMap::new();
+    for name in project.names() {
+        let model = project.get(name).expect("names() yields known models");
+        let hash = match cache.get_mut(name) {
+            Some((sql, hash)) if *sql == model.sql => hash,
+            Some(stale) => {
+                *stale = (model.sql.clone(), fp.hash_sql(&model.sql));
+                &stale.1
+            }
+            None => &cache.entry(name.clone()).or_insert((model.sql.clone(), fp.hash_sql(&model.sql))).1,
+        };
+        out.insert(name.clone(), hash.finish(model).fingerprint);
+    }
+    out
+}
+
 fn plan_state_differs(
     project_a: &Project,
     incremental_a: &IncrementalConfig,
@@ -571,18 +620,185 @@ fn parse_materializations(raw: BTreeMap<String, String>) -> Result<BTreeMap<Stri
 /// address rather than silently accepting it. A planner daemon reachable from a
 /// network is a daemon anyone on that network can hand arbitrary SQL to parse and
 /// can read every model's source from.
+/// A project as files on disk: what `freshet-serve --project` loads at startup, and
+/// what `--watch` loads again when they change.
+#[derive(Clone, Debug)]
+pub struct ProjectFiles {
+    /// The `.sql` models, non-recursively; each file's stem is the model name.
+    pub dir: std::path::PathBuf,
+    /// Source-table schemas, `sources.json`'s shape.
+    pub sources: Option<std::path::PathBuf>,
+    /// Materialization hints, `materializations.json`'s shape.
+    pub materializations: Option<std::path::PathBuf>,
+    /// Per-model incremental declarations, `incremental.json`'s shape.
+    pub incremental: Option<std::path::PathBuf>,
+}
+
+impl ProjectFiles {
+    /// Read the files into the [`Request::Reload`] a client would send for them.
+    pub fn reload_request(&self) -> anyhow::Result<Request> {
+        fn json<T: serde::de::DeserializeOwned + Default>(path: &Option<std::path::PathBuf>) -> anyhow::Result<T> {
+            let Some(path) = path else { return Ok(T::default()) };
+            let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))
+        }
+        Ok(Request::Reload {
+            models: read_models(&self.dir)?,
+            sources: json(&self.sources)?,
+            materializations: json(&self.materializations)?,
+            incremental: json(&self.incremental)?,
+        })
+    }
+}
+
+/// Read `*.sql` from `dir`, non-recursively, as `(model name, SQL)` pairs.
+///
+/// Non-recursive on purpose: nested directories in dbt-shaped projects carry meaning
+/// (staging/marts/…) that this daemon has no model for, and flattening them would
+/// silently collide two models named `orders.sql` in different folders. A project
+/// laid out that way should be described by a `reload` request, which names each
+/// model explicitly.
+fn read_models(dir: &std::path::Path) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("reading project directory {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            anyhow::bail!("model file name is not valid UTF-8: {}", path.display());
+        };
+        out.push((name.to_string(), std::fs::read_to_string(&path)?));
+    }
+    if out.is_empty() {
+        anyhow::bail!("no .sql files in {}", dir.display());
+    }
+    // Deterministic order: `read_dir` yields in filesystem order, which differs
+    // between machines, and the project's model order reaches the plan's output.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Reload the project from disk when its files change (`freshet-serve --watch`).
+///
+/// A watched reload is a [`Request::Reload`] like any other, so it keeps every
+/// guarantee a client's has: it reparses only what changed, a failed one (SQL caught
+/// mid-edit) leaves the previous project serving, and the revision moves only when
+/// what plans read moved, so a token staged before an edit that changed nothing a plan
+/// reads still commits. What an operator opts into with `--watch` is that an edit to a
+/// model *is* a reload: a plan staged before it can no longer commit, because the
+/// project it was computed from is gone — the stale-plan guard working, not a hazard.
+#[cfg(feature = "watch")]
+pub mod watch {
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use notify::{EventKind, RecursiveMode, Watcher};
+
+    use super::{ProjectCache, ProjectFiles, Response};
+
+    /// How long the files must be quiet before a reload: an editor's save is several
+    /// events, and a checkout is thousands.
+    pub const QUIET: Duration = Duration::from_millis(250);
+
+    /// A running watch. Dropping it stops watching.
+    pub struct Watching {
+        _watcher: notify::RecommendedWatcher,
+    }
+
+    /// Watch `files` and reload `cache` from them each time they change and then stay
+    /// quiet for `quiet`, telling `report` how each reload went.
+    pub fn start(
+        cache: Arc<ProjectCache>,
+        files: ProjectFiles,
+        quiet: Duration,
+        report: impl Fn(&Response) + Send + 'static,
+    ) -> anyhow::Result<Watching> {
+        let dir = canonical(&files.dir)?;
+        let configs: Vec<PathBuf> = [&files.sources, &files.materializations, &files.incremental]
+            .into_iter()
+            .flatten()
+            .map(|p| canonical(p))
+            .collect::<anyhow::Result<_>>()?;
+        let wanted = {
+            let (dir, configs) = (dir.clone(), configs.clone());
+            move |path: &Path| {
+                (path.parent() == Some(dir.as_path()) && path.extension().is_some_and(|e| e == "sql"))
+                    || configs.iter().any(|c| c == path)
+            }
+        };
+        let (tx, rx) = mpsc::channel::<()>();
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return };
+            if matches!(event.kind, EventKind::Access(_)) {
+                return;
+            }
+            if event.paths.iter().any(|p| wanted(p)) {
+                let _ = tx.send(());
+            }
+        })?;
+        // Directories, not files: an editor that saves by renaming a new file over the
+        // old one would leave a watch on the old file's inode watching nothing.
+        let mut watched: Vec<PathBuf> = vec![dir];
+        for c in &configs {
+            if let Some(parent) = c.parent() {
+                if !watched.iter().any(|w| w == parent) {
+                    watched.push(parent.to_path_buf());
+                }
+            }
+        }
+        for w in &watched {
+            watcher.watch(w, RecursiveMode::NonRecursive)?;
+        }
+        std::thread::spawn(move || {
+            // Ends when the watcher, and the sender inside it, is dropped.
+            while rx.recv().is_ok() {
+                while rx.recv_timeout(quiet).is_ok() {}
+                let response = match files.reload_request() {
+                    Ok(request) => cache.handle(request),
+                    Err(e) => Response::Error { message: format!("{e:#}") },
+                };
+                report(&response);
+            }
+        });
+        Ok(Watching { _watcher: watcher })
+    }
+
+    fn canonical(path: &Path) -> anyhow::Result<PathBuf> {
+        path.canonicalize().map_err(|e| anyhow::anyhow!("watching {}: {e}", path.display()))
+    }
+}
+
 #[cfg(feature = "http")]
 pub mod http {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
     use axum::extract::{DefaultBodyLimit, State};
-    use axum::http::{header, StatusCode};
+    use axum::http::{header, HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::Router;
 
     use super::{ProjectCache, Response};
+
+    /// The environment variable holding the bearer token `/rpc` requires.
+    ///
+    /// An environment variable, not a flag, so the token is not in the process's
+    /// arguments for anyone on the host to read — the CLI's hosted-state token,
+    /// `FRESHET_STATE_TOKEN`, is passed the same way.
+    pub const TOKEN_ENV: &str = "FRESHET_SERVE_TOKEN";
+
+    #[derive(Clone)]
+    struct AppState {
+        cache: Arc<ProjectCache>,
+        /// `Some`: every `/rpc` request must carry `Authorization: Bearer <token>`.
+        token: Option<Arc<[u8]>>,
+    }
 
     /// Largest request body accepted, in bytes.
     ///
@@ -593,19 +809,32 @@ pub mod http {
     /// memory by describing one".
     pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-    /// The router, for a caller that wants to nest it or drive it in a test.
+    /// The router, with no authentication, for a caller that wants to nest it behind
+    /// its own or drive it in a test.
     pub fn router(cache: Arc<ProjectCache>) -> Router {
+        router_with(cache, None)
+    }
+
+    /// The router; with a `token`, `/rpc` answers only requests that carry it as
+    /// `Authorization: Bearer <token>`, and anything else gets a 401.
+    ///
+    /// `/healthz` stays open: a liveness probe has no token to send, and all it can
+    /// learn is the project's revision number. Every route that reads a model or
+    /// takes one is `/rpc`.
+    pub fn router_with(cache: Arc<ProjectCache>, token: Option<String>) -> Router {
+        let token = token.map(|t| Arc::from(t.into_bytes()));
         Router::new()
             .route("/rpc", post(rpc))
             .route("/healthz", get(healthz))
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .with_state(cache)
+            .with_state(AppState { cache, token })
     }
 
-    /// Bind `addr` and serve until SIGINT / SIGTERM.
-    pub async fn serve(cache: Arc<ProjectCache>, addr: SocketAddr) -> std::io::Result<()> {
+    /// Bind `addr` and serve until SIGINT / SIGTERM, requiring `token` on `/rpc` when
+    /// there is one.
+    pub async fn serve(cache: Arc<ProjectCache>, addr: SocketAddr, token: Option<String>) -> std::io::Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        serve_on(cache, listener).await
+        serve_on_with(cache, listener, token).await
     }
 
     /// Serve on a listener the caller already bound.
@@ -619,26 +848,57 @@ pub mod http {
         cache: Arc<ProjectCache>,
         listener: tokio::net::TcpListener,
     ) -> std::io::Result<()> {
-        axum::serve(listener, router(cache))
+        serve_on_with(cache, listener, None).await
+    }
+
+    /// [`serve_on`], requiring `token` on `/rpc` when there is one.
+    pub async fn serve_on_with(
+        cache: Arc<ProjectCache>,
+        listener: tokio::net::TcpListener,
+        token: Option<String>,
+    ) -> std::io::Result<()> {
+        axum::serve(listener, router_with(cache, token))
             .with_graceful_shutdown(shutdown())
             .await
     }
 
-    /// Print a warning when the daemon is bound anywhere but loopback.
+    /// Print a warning when the daemon is bound anywhere but loopback without a token,
+    /// and a note when it is bound there with one.
     ///
     /// Returns whether it warned, so a caller (and a test) can assert on the
     /// decision rather than on stderr.
-    pub fn warn_if_exposed(addr: SocketAddr) -> bool {
+    pub fn warn_if_exposed(addr: SocketAddr, authenticated: bool) -> bool {
         if addr.ip().is_loopback() {
             return false;
         }
+        if authenticated {
+            eprintln!(
+                "note: binding {addr}, which is not loopback; /rpc requires the bearer token. \
+                 It is plain HTTP, so the token crosses the network in clear text: terminate \
+                 TLS in front of the daemon."
+            );
+            return false;
+        }
         eprintln!(
-            "warning: binding {addr}, which is not loopback. freshet-serve has no \
-             authentication: anyone who can reach this address can read every model's \
-             SQL and submit arbitrary SQL for it to parse. Put it behind something that \
-             authenticates, or bind 127.0.0.1."
+            "warning: binding {addr}, which is not loopback, with no token. Anyone who can \
+             reach this address can read every model's SQL and submit arbitrary SQL for it \
+             to parse. Set {TOKEN_ENV} to require a bearer token, put it behind something \
+             that authenticates, or bind 127.0.0.1."
         );
         true
+    }
+
+    /// Whether `headers` carry `Authorization: Bearer <token>`. The comparison takes
+    /// the same time wherever the given token first differs, so timing it reveals
+    /// nothing but its length.
+    fn authorized(headers: &HeaderMap, token: &[u8]) -> bool {
+        let Some(given) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.as_bytes().strip_prefix(b"Bearer "))
+        else {
+            return false;
+        };
+        given.len() == token.len() && given.iter().zip(token).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
     }
 
     async fn shutdown() {
@@ -683,7 +943,37 @@ pub mod http {
     /// reading the revision needs that same lock. `spawn_blocking` puts it on the pool
     /// that exists for exactly this, where a thread sitting on a lock costs nothing the
     /// runtime needs back.
-    async fn rpc(State(cache): State<Arc<ProjectCache>>, body: axum::body::Bytes) -> impl IntoResponse {
+    async fn rpc(State(app): State<AppState>, request: axum::extract::Request) -> axum::response::Response {
+        let (parts, body) = request.into_parts();
+        // The one answer that is not the funnel's: a request without the token never
+        // reaches it, so it is a transport refusal, with a status code, and a body in
+        // the funnel's error shape so a client still has something to parse. It is
+        // given before a byte of the body is read, so a caller without the token
+        // cannot make the daemon buffer `MAX_BODY_BYTES` just to be told no.
+        if let Some(token) = &app.token {
+            if !authorized(&parts.headers, token) {
+                let message = format!("unauthorized: send Authorization: Bearer <the {TOKEN_ENV} token>");
+                let body = serde_json::to_string(&Response::Error { message })
+                    .unwrap_or_else(|_| r#"{"status":"error","message":"unauthorized"}"#.to_string());
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::CONTENT_TYPE, "application/json"), (header::WWW_AUTHENTICATE, "Bearer")],
+                    body,
+                )
+                    .into_response();
+            }
+        }
+        let body = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+            Ok(body) => body,
+            Err(e) => {
+                let message = format!("request body not read (the limit is {MAX_BODY_BYTES} bytes): {e}");
+                let body = serde_json::to_string(&Response::Error { message })
+                    .unwrap_or_else(|_| r#"{"status":"error","message":"request body not read"}"#.to_string());
+                return (StatusCode::PAYLOAD_TOO_LARGE, [(header::CONTENT_TYPE, "application/json")], body)
+                    .into_response();
+            }
+        };
+        let cache = app.cache;
         // `spawn_blocking` wants a `'static` closure, so the request has to be owned
         // rather than borrowed out of `body`. That costs nothing over the old
         // `str::from_utf8`: `Bytes -> Vec<u8>` hands the buffer over when this is the
@@ -703,10 +993,11 @@ pub mod http {
                 r#"{{"status":"error","message":"request body is not valid UTF-8: {e}"}}"#
             ),
         };
-        ([(header::CONTENT_TYPE, "application/json")], json)
+        ([(header::CONTENT_TYPE, "application/json")], json).into_response()
     }
 
-    async fn healthz(State(cache): State<Arc<ProjectCache>>) -> impl IntoResponse {
+    async fn healthz(State(app): State<AppState>) -> impl IntoResponse {
+        let cache = app.cache;
         // Cheap as it looks, `revision()` takes the read lock, so it blocks for as long
         // as whatever holds the write guard — a `plan` fingerprinting the project, say.
         // On a worker thread that turns the liveness probe into a second stalled
@@ -805,6 +1096,10 @@ mod http_concurrency_tests {
     }
 
     #[tokio::test]
+    // Holding the cache's write guard across awaits is the test: it stands in for a
+    // reparse that holds it, and the daemon under test runs on its own runtime, so
+    // only the requests it serves wait on it. Nothing writes through it either.
+    #[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
     async fn a_request_waiting_on_the_cache_does_not_stall_the_daemon() {
         let cache = Arc::new(ProjectCache::new());
         let addr = serve_single_worker(cache.clone());
@@ -839,6 +1134,10 @@ mod http_concurrency_tests {
     /// one that reports slowly. Reverting only the `healthz` half of the offload leaves the
     /// test above green, which is what makes this one necessary and not a duplicate.
     #[tokio::test]
+    // Holding the cache's write guard across awaits is the test: it stands in for a
+    // reparse that holds it, and the daemon under test runs on its own runtime, so
+    // only the requests it serves wait on it. Nothing writes through it either.
+    #[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
     async fn a_health_check_waiting_on_the_cache_does_not_stall_the_daemon() {
         let cache = Arc::new(ProjectCache::new());
         let addr = serve_single_worker(cache.clone());

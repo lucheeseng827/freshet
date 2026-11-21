@@ -24,6 +24,11 @@ path = "src/bin/freshet-bench-export.rs"
 name = "freshet-bench-manifest"
 path = "src/bin/freshet-bench-manifest.rs"
 
+# The plan-quality sweep across lineage densities, against the generator's wiring.
+[[bin]]
+name = "freshet-bench-quality"
+path = "src/bin/freshet-bench-quality.rs"
+
 [dependencies]
 freshet-api = { workspace = true }
 freshet-core = { workspace = true }

@@ -26,3 +26,8 @@ freshet-state = { workspace = true } # reuse the `Fingerprint` (= u64) alias; ne
 # Pinned EXACTLY to the planner core's freshet-sql (0.52 + "visitor") via workspace dep.
 # Optional + behind `ast` so the Text-only fallback build needs no SQL engine.
 sqlparser = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The planner core's parse, so a test can show that fingerprinting from it is
+# fingerprinting from scratch (`report_parsed` vs `report`). Already in the graph.
+freshet-sql = { workspace = true }

@@ -38,6 +38,7 @@ COLD_PLAN = {
     "revision": 1,
     "token": 0,
     "plan": {
+        "cold": True,
         "models": [
             {"name": "stg", "reason": "directly_changed", "unit": "full_model"},
             {
@@ -117,6 +118,11 @@ class PlanParsingTests(unittest.TestCase):
         self.assertEqual(plan.models[1].because_of, "stg")
         self.assertEqual(plan.models[1].via_columns, ["a"])
         self.assertIsNone(plan.models[1].partitions)
+
+    def test_a_cold_plan_says_so_and_a_warm_one_does_not(self):
+        # Contract v6: the daemon writes `cold` only for a plan with no state behind it.
+        self.assertTrue(Plan.from_wire(COLD_PLAN).cold)
+        self.assertFalse(Plan.from_wire({"revision": 2, "plan": {"models": []}}).cold)
 
     def test_cost_converts_millicu_to_cu_without_losing_the_exact_value(self):
         plan = Plan.from_wire(COLD_PLAN)

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! freshet plan        --project ./models --state .planner/state.json [--commit] [--json] [--sql postgres]
-//! freshet plan        --project ./models --state https://edge.example/state/v1 [--commit [--expect-version N]]
+//! freshet plan        --project ./models --state https://state.example.com/v1/analytics [--commit [--expect-version N]]
 //! freshet restate     --project ./models --model events --partitions 2026-06-20,2026-06-21 [--json] [--sql bigquery]
 //! freshet fingerprint --project ./models      # AST-canonical fingerprints + text fallbacks
 //! freshet graph       --project ./models      # topological model order
@@ -46,10 +46,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use freshet_core::{CostModel, Materialization, Project};
-use freshet_embed::{build_project_with_hints, to_wire, to_wire_with_estimate_and_budget};
-use freshet_fingerprint::AstFingerprinter;
+use freshet_embed::{to_wire, to_wire_with_estimate_and_budget, with_hints};
+use freshet_fingerprint::{AstFingerprinter, TreeHashes};
 use freshet_incremental::IncrementalConfig;
-use freshet_sql::Catalog;
+use freshet_sql::{build_project_taking, Catalog, Undeclared, UndeclaredTables};
 use freshet_state::StateSnapshot;
 use state::{ExpectedVersion, StateLocation};
 
@@ -58,6 +58,37 @@ use state::{ExpectedVersion, StateLocation};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Refuse a table that is neither a model nor declared in `sources.json`,
+    /// rather than plan it as an external table. For CI: a misspelled model
+    /// (`from stgg` for `stg`) otherwise loses its edge and runs beside the model
+    /// it reads. `"raw": []` declares a table without listing its columns.
+    #[arg(long, global = true)]
+    strict_refs: bool,
+}
+
+/// What [`load_project`] does with an undeclared table, set once by `main` from
+/// `--strict-refs` before any command runs: every command that loads a project
+/// shares the flag, and none of them has to carry it.
+static UNDECLARED: std::sync::OnceLock<Undeclared> = std::sync::OnceLock::new();
+
+#[derive(Subcommand)]
+enum CostCmd {
+    /// Record one run: a whole rebuild of `--model`, or `--partitions N` of it.
+    Record {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        model: String,
+        /// What the run cost, in the record's unit.
+        #[arg(long)]
+        value: f64,
+        /// A partition-scoped run of this many partitions; omit for a whole rebuild.
+        #[arg(long)]
+        partitions: Option<usize>,
+        /// The unit: required for the first run recorded, and must then match.
+        #[arg(long)]
+        unit: Option<String>,
+    },
 }
 
 /// `--sql` and its companions, shared by every subcommand that emits a plan.
@@ -100,7 +131,7 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// Where committed state lives: a state file, or a hosted state API
-        /// (`https://<edge>/state/v1`, token in FRESHET_STATE_TOKEN) whose commits are
+        /// (`https://<host>/v1/<name>`, token in FRESHET_STATE_TOKEN) whose commits are
         /// compare-and-swap.
         #[arg(long, default_value = ".planner/state.json", value_name = "FILE|URL")]
         state: String,
@@ -126,6 +157,12 @@ enum Cmd {
         /// even with `--commit`.
         #[arg(long, value_name = "CU")]
         budget: Option<f64>,
+        /// With `--json`: carry `next_state`, the snapshot `--commit` writes once the
+        /// plan has run, so a consumer that reviews plans can check that the commit
+        /// it later receives is the plan it approved. Left out of an over-budget
+        /// plan, which must not be committed.
+        #[arg(long, requires = "json")]
+        with_next_state: bool,
         #[command(flatten)]
         render: RenderArgs,
     },
@@ -167,6 +204,34 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
+    /// Record what a run of a model cost, so plans are priced in that unit too.
+    ///
+    /// The record is `costs.json` in the project directory, the team's own: Freshet
+    /// never sends it anywhere. `plan` and `restate` then show a measured estimate
+    /// beside the rate card, saying how much of it was measured.
+    Cost {
+        #[command(subcommand)]
+        what: CostCmd,
+    },
+    /// List hosted state's commits, newest first: what each one changed, and when.
+    ///
+    /// Hosted state keeps every commit; a state file keeps only the current snapshot,
+    /// so there is nothing to list for one.
+    History {
+        /// The hosted state URL (`https://<host>/v1/<name>`), token in `FRESHET_STATE_TOKEN`.
+        #[arg(long)]
+        state: String,
+        /// The most commits to list. The server may return fewer (it caps a page).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// List only commits older than this version: the next page, as the previous
+        /// one names it.
+        #[arg(long, value_name = "VERSION", value_parser = clap::value_parser!(i64).range(1..))]
+        before: Option<i64>,
+        /// The server's commits as JSON instead of a summary per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what Freshet would have pruned from an existing dbt project's last run.
     Explain(explain::ExplainArgs),
     /// Move the project to another warehouse, partition by partition: render each
@@ -205,6 +270,11 @@ enum Cmd {
         /// Extra request header, repeatable: `--header 'Authorization: Bearer …'`.
         #[arg(long = "header", value_name = "NAME: VALUE")]
         headers: Vec<String>,
+        /// Carry `next_state` in the plan: the snapshot `plan --commit` writes once
+        /// the run has succeeded, for a consumer that reviews plans and checks the
+        /// commit it later receives against the one it approved.
+        #[arg(long)]
+        with_next_state: bool,
         /// Carry each model's SQL in the plan (contract v4), so the consumer can run
         /// it — e.g. through `{{ sql }}` in dagron-state.
         #[command(flatten)]
@@ -213,9 +283,11 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    let result = match Cli::parse().cmd {
-        Cmd::Plan { project, state, commit, expect_version, json, budget, render } => {
-            cmd_plan(&project, &state, commit, expect_version, json, budget, &render)
+    let cli = Cli::parse();
+    let _ = UNDECLARED.set(if cli.strict_refs { Undeclared::Refuse } else { Undeclared::External });
+    let result = match cli.cmd {
+        Cmd::Plan { project, state, commit, expect_version, json, budget, with_next_state, render } => {
+            cmd_plan(&project, &state, commit, expect_version, json, budget, with_next_state, &render)
         }
         Cmd::Restate { project, model, partitions, json, state, commit, expect_version, render } => {
             cmd_restate(&project, &model, partitions, json, state.as_deref(), commit, expect_version, &render)
@@ -224,8 +296,12 @@ fn main() -> Result<()> {
         Cmd::Explain(args) => explain::run(&args),
         Cmd::Move(args) => migrate::run(&args),
         Cmd::Graph { project } => cmd_graph(&project),
+        Cmd::History { state, limit, before, json } => cmd_history(&state, limit, before, json),
+        Cmd::Cost { what: CostCmd::Record { project, model, value, partitions, unit } } => {
+            cmd_cost_record(&project, &model, value, partitions, unit.as_deref())
+        }
         #[cfg(feature = "submit")]
-        Cmd::Submit { project, state, to, command, options_file, no_graph, dry_run, headers, render } => {
+        Cmd::Submit { project, state, to, command, options_file, no_graph, dry_run, headers, with_next_state, render } => {
             cmd_submit(SubmitArgs {
                 project_dir: &project,
                 state: &state,
@@ -235,6 +311,7 @@ fn main() -> Result<()> {
                 no_graph,
                 dry_run,
                 headers: &headers,
+                with_next_state,
                 render: &render,
             })
         }
@@ -247,6 +324,11 @@ fn main() -> Result<()> {
         if let Some(conflict) = e.downcast_ref::<state::StateConflict>() {
             eprintln!("error: {conflict}");
             std::process::exit(state::EXIT_STATE_CONFLICT);
+        }
+        // A refusal the user asked for, about their SQL: the tables, plainly.
+        if let Some(refused) = e.downcast_ref::<UndeclaredTables>() {
+            eprintln!("error: {refused}");
+            std::process::exit(1);
         }
     }
     result
@@ -262,9 +344,19 @@ fn main() -> Result<()> {
 /// `fingerprint_project` — same `BTreeMap<String, u64>` — plus whatever the state's
 /// ledger says a crashed restatement still owes, and the declared grains and windows.
 /// `previous` is the same snapshot whether it came from a file or hosted state.
-fn diff_against_state(project: &Project, incremental: &IncrementalConfig, previous: &StateSnapshot) -> freshet_embed::CodeChangePlan {
+///
+/// `trees` hashed the load's own parse of every model, so the fingerprint does not
+/// parse the project a second time.
+fn diff_against_state(
+    project: &Project,
+    trees: TreeHashes,
+    incremental: &IncrementalConfig,
+    previous: &StateSnapshot,
+) -> freshet_embed::CodeChangePlan {
+    let fp = AstFingerprinter::new();
+    let current = fp.report_hashed(project, trees).into_state_map();
     // A scheme upgrade re-keys unchanged models instead of rebuilding them.
-    let r = freshet_fingerprint::reconcile(previous, project, &AstFingerprinter::new());
+    let r = freshet_fingerprint::reconcile_from(previous, project, &fp, current);
     if !r.rekeyed.is_empty() {
         eprintln!(
             "note: {} model(s) carry fingerprints from an older scheme but are unchanged — \
@@ -323,6 +415,7 @@ fn budget_to_millicu(cu: f64) -> Result<u64> {
     Ok(millicu as u64)
 }
 
+#[allow(clippy::too_many_arguments)] // one per flag; the dispatch arm names them all
 fn cmd_plan(
     project_dir: &Path,
     state_arg: &str,
@@ -330,13 +423,14 @@ fn cmd_plan(
     expect: Option<ExpectedVersion>,
     json: bool,
     budget: Option<f64>,
+    with_next_state: bool,
     render: &RenderArgs,
 ) -> Result<()> {
-    let Loaded { project, incremental, .. } = load_project(project_dir)?;
+    let (Loaded { project, incremental }, trees) = load_project_hashed(project_dir)?;
     let location = StateLocation::parse(state_arg)?;
     let prior = load_state(&location, expect)?;
     let freshet_embed::CodeChangePlan { plan, redefined, next_state } =
-        diff_against_state(&project, &incremental, &prior.snapshot);
+        diff_against_state(&project, trees, &incremental, &prior.snapshot);
 
     let budget_millicu = budget.map(budget_to_millicu).transpose()?;
     // One call produces both the JSON and the headroom, so the number printed to a
@@ -350,6 +444,10 @@ fn cmd_plan(
         false,
         budget_millicu,
     );
+    // Contract v6: a plan with no committed fingerprints to diff against says so —
+    // no state file yet, or an empty one. Not a scheme upgrade, which re-keys the
+    // models it finds unchanged above instead of rebuilding them.
+    resp.cold = prior.snapshot.fingerprints.is_empty();
     let headroom = resp.headroom.clone();
     let over_budget = headroom.as_ref().is_some_and(|h| h.exceeded);
 
@@ -366,9 +464,19 @@ fn cmd_plan(
     }
 
     if json {
+        if with_next_state && !over_budget {
+            resp.next_state = Some(next_state.clone());
+        }
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
-        print_plan_human(&project, &plan, &incremental);
+        if resp.cold && !plan.is_empty() {
+            println!(
+                "cold plan: {} holds no committed state, so every model rebuilds — commit after \
+                 it has run, and later plans rebuild only what changed",
+                location.describe()
+            );
+        }
+        print_plan_human(&project, &plan, &incremental, read_costs(project_dir)?.as_ref());
         if let Some(h) = &headroom {
             print_headroom(h);
         }
@@ -503,6 +611,7 @@ struct SubmitArgs<'a> {
     no_graph: bool,
     dry_run: bool,
     headers: &'a [String],
+    with_next_state: bool,
     render: &'a RenderArgs,
 }
 
@@ -514,11 +623,11 @@ struct SubmitArgs<'a> {
 /// loop it exists for.
 #[cfg(feature = "submit")]
 fn cmd_submit(args: SubmitArgs<'_>) -> Result<()> {
-    let Loaded { project, incremental, .. } = load_project(args.project_dir)?;
+    let (Loaded { project, incremental }, trees) = load_project_hashed(args.project_dir)?;
     let location = StateLocation::parse(args.state)?;
     let prior = load_state(&location, None)?;
-    let freshet_embed::CodeChangePlan { plan, redefined, .. } =
-        diff_against_state(&project, &incremental, &prior.snapshot);
+    let freshet_embed::CodeChangePlan { plan, redefined, next_state } =
+        diff_against_state(&project, trees, &incremental, &prior.snapshot);
 
     // An empty plan opens no socket. But `--dry-run` promises the request body on
     // stdout, and the README pipes that straight into `dagron-state explain -`, so
@@ -534,10 +643,14 @@ fn cmd_submit(args: SubmitArgs<'_>) -> Result<()> {
 
     // The plan carries its own effort map (`cost`, the CU estimate at the default
     // rate card): part of the planner's contract, not the consumer's, and what a
-    // consumer that runs plans on compute it supplies — dagron Cloud, for a workspace
-    // in hosted compute mode — meters. A consumer that does not read it ignores it
-    // (dagron-state does not mirror `cost` at all).
+    // consumer that runs plans on compute it supplies may meter. A consumer that does
+    // not read it ignores it (dagron-state does not mirror `cost` at all).
     let mut wire = freshet_embed::to_wire_with_estimate(&project, &plan, &incremental, &CostModel::default(), true, false);
+    // Contract v6, as `plan` says it: no committed fingerprints to diff against.
+    wire.cold = prior.snapshot.fingerprints.is_empty();
+    if args.with_next_state {
+        wire.next_state = Some(next_state);
+    }
     if let Some(opts) = args.render.options(redefined)? {
         freshet_embed::attach_sql(&mut wire, &project, &plan, &incremental, &opts)?;
     }
@@ -545,6 +658,7 @@ fn cmd_submit(args: SubmitArgs<'_>) -> Result<()> {
         plan: wire,
         graph: (!args.no_graph).then(|| submit::project_graph(&project)),
         options: submit::build_options(args.command, args.options_file)?,
+        expected_version: prior.hosted_version,
     };
     let body = serde_json::to_string_pretty(&envelope).context("serializing the request")?;
 
@@ -610,7 +724,7 @@ fn cmd_restate(
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
-        print_plan_human(&project, &plan, &incremental);
+        print_plan_human(&project, &plan, &incremental, read_costs(project_dir)?.as_ref());
         print_sql_human(&resp);
     }
 
@@ -674,8 +788,8 @@ fn print_sql_human(resp: &freshet_embed::PlanResponse) {
 }
 
 fn cmd_fingerprint(project_dir: &Path) -> Result<()> {
-    let Loaded { project, .. } = load_project(project_dir)?;
-    let report = AstFingerprinter::new().report(&project);
+    let (Loaded { project, .. }, trees) = load_project_hashed(project_dir)?;
+    let report = AstFingerprinter::new().report_hashed(&project, trees);
     for (name, fp) in &report.per_model {
         println!("{name:<24} {:016x}  [{:?}]", fp.fingerprint, fp.scheme);
     }
@@ -702,7 +816,144 @@ fn cmd_graph(project_dir: &Path) -> Result<()> {
     }
 }
 
-fn print_plan_human(project: &Project, plan: &freshet_core::BackfillPlan, cfg: &IncrementalConfig) {
+/// `costs.json` in `dir`, if the team keeps one.
+fn read_costs(dir: &Path) -> Result<Option<freshet_embed::measured::Costs>> {
+    read_json_map(&dir.join("costs.json"))
+}
+
+fn cmd_cost_record(dir: &Path, model: &str, value: f64, partitions: Option<usize>, unit: Option<&str>) -> Result<()> {
+    if !dir.join(format!("{model}.sql")).is_file() {
+        anyhow::bail!("{} has no model `{model}` ({model}.sql)", dir.display());
+    }
+    let path = dir.join("costs.json");
+    let mut costs = match (read_costs(dir)?, unit) {
+        (Some(costs), Some(unit)) if costs.unit != unit => anyhow::bail!(
+            "{} records costs in {}, not {unit}: one file holds one unit",
+            path.display(),
+            costs.unit
+        ),
+        (Some(costs), _) => costs,
+        (None, Some(unit)) if !unit.trim().is_empty() => {
+            freshet_embed::measured::Costs { unit: unit.trim().to_string(), ..Default::default() }
+        }
+        (None, _) => anyhow::bail!(
+            "{} does not exist yet: say what unit costs are in with --unit (seconds, credits, …)",
+            path.display()
+        ),
+    };
+    costs.record(model, value, partitions)?;
+    // Through a temporary file and a rename, so a reader never sees half a record.
+    let tmp = dir.join(".costs.json.tmp");
+    std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(&costs)?))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    let what = match partitions {
+        Some(n) => format!("{n} partition(s)"),
+        None => "a whole rebuild".to_string(),
+    };
+    eprintln!("recorded {model}: {what} at {value} {} -> {}", costs.unit, path.display());
+    Ok(())
+}
+
+/// The measured line beside the rate card, when the team records what runs cost.
+fn measured_line(e: &freshet_embed::measured::MeasuredEstimate) -> String {
+    let u = &e.unit;
+    format!(
+        "measured: {:.1} {u} planned, {:.0}% of it from the models' own runs (the rest at {:.2} {u} per CU) · \
+         {:.1} {u} avoided — rebuilding everything downstream whole would be {:.1} {u}",
+        e.total,
+        e.measured_share() * 100.0,
+        e.per_cu,
+        e.avoided(),
+        e.unpruned
+    )
+}
+
+// Without the `hosted` feature every state is a file, so only the error branch is left.
+#[cfg_attr(not(feature = "hosted"), allow(unused_variables))]
+fn cmd_history(state_arg: &str, limit: usize, before: Option<i64>, json: bool) -> Result<()> {
+    match StateLocation::parse(state_arg)? {
+        StateLocation::File(path) => anyhow::bail!(
+            "{} is a state file, which keeps only the current snapshot: there is no history to \
+             list. Hosted state (`--state https://…`) keeps every commit.",
+            path.display()
+        ),
+        #[cfg(feature = "hosted")]
+        StateLocation::Hosted(hosted) => {
+            let history = hosted.history(limit.max(1), before)?;
+            if let Some(before) = before {
+                // A server that does not page ignores `before` and answers with its
+                // newest commits, which would read as the older ones asked for.
+                if !history.pages || history.commits.iter().any(|c| c.version >= before) {
+                    anyhow::bail!(
+                        "{} does not page its history: it ignored --before {before}, so only its newest \
+                         commits can be listed",
+                        hosted.url()
+                    );
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+                return Ok(());
+            }
+            println!("{}: {} commit(s), newest first", hosted.url(), history.commits.len());
+            for c in &history.commits {
+                println!("  v{:<5} {}  {}", c.version, c.committed_at, describe_commit(&c.summary));
+            }
+            let oldest = history.commits.last().map(|c| c.version);
+            if history.pages {
+                match (history.next_before, oldest) {
+                    (Some(next), _) => println!("  … older commits: freshet history --state {} --before {next}", hosted.url()),
+                    (None, Some(v)) if v > 1 => {
+                        println!("  (commits before v{v} are no longer kept: the server keeps a fixed number)")
+                    }
+                    _ => {}
+                }
+            } else if history.commits.len() as i64 >= history.limit && oldest.is_some_and(|v| v > 1) {
+                println!("  … older commits not shown (this page holds {}; the server caps a page)", history.limit);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One line for a commit's summary: what changed, by model, a few named.
+#[cfg_attr(not(feature = "hosted"), allow(dead_code))]
+fn describe_commit(summary: &serde_json::Value) -> String {
+    let names = |key: &str| -> Vec<String> {
+        summary
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let part = |label: &str, models: Vec<String>| {
+        let shown: Vec<&str> = models.iter().take(3).map(String::as_str).collect();
+        let more = if models.len() > 3 { format!(", +{}", models.len() - 3) } else { String::new() };
+        if models.is_empty() {
+            format!("0 {label}")
+        } else {
+            format!("{} {label} ({}{more})", models.len(), shown.join(", "))
+        }
+    };
+    let mut line = [
+        part("changed", names("changed")),
+        part("removed", names("removed")),
+        part("ledgers moved", names("watermarks_changed")),
+    ]
+    .join(" · ");
+    if let Some(context) = summary.get("context").filter(|c| !c.is_null()) {
+        line.push_str(&format!(" · context {context}"));
+    }
+    line
+}
+
+fn print_plan_human(
+    project: &Project,
+    plan: &freshet_core::BackfillPlan,
+    cfg: &IncrementalConfig,
+    costs: Option<&freshet_embed::measured::Costs>,
+) {
     if plan.is_empty() {
         println!("nothing to backfill — state is up to date.");
         return;
@@ -727,6 +978,9 @@ fn print_plan_human(project: &Project, plan: &freshet_core::BackfillPlan, cfg: &
         }
     }
     println!("{}", rebuild_work_line(project, plan));
+    if let Some(e) = costs.and_then(|c| freshet_embed::measured::estimate(project, plan, c)) {
+        println!("{}", measured_line(&e));
+    }
 
     // Widenings are the expensive surprise, so they get their own block rather
     // than only a line buried per model: an operator scanning a 40-model plan
@@ -787,6 +1041,18 @@ fn describe_widening(w: &freshet_incremental::Widening) -> String {
 /// Load a project directory: `*.sql` models + optional `sources.json` +
 /// optional `materializations.json` + optional `incremental.json`.
 fn load_project(dir: &Path) -> Result<Loaded> {
+    load(dir, None)
+}
+
+/// [`load_project`], also hashing each model's parsed tree for the AST fingerprint
+/// while the build hands it over, so `plan` does not parse the project twice.
+fn load_project_hashed(dir: &Path) -> Result<(Loaded, TreeHashes)> {
+    let mut trees = TreeHashes::default();
+    let loaded = load(dir, Some(&mut trees))?;
+    Ok((loaded, trees))
+}
+
+fn load(dir: &Path, mut trees: Option<&mut TreeHashes>) -> Result<Loaded> {
     let mut models: Vec<(String, String)> = Vec::new();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading project dir {}", dir.display()))? {
         let path = entry?.path();
@@ -805,7 +1071,20 @@ fn load_project(dir: &Path) -> Result<Loaded> {
     let sources: Catalog = read_json_map(&dir.join("sources.json"))?.unwrap_or_default();
     let hints = read_materializations(&dir.join("materializations.json"))?;
 
-    let project = build_project_with_hints(&models, &sources, &hints).context("building project from SQL")?;
+    let undeclared = UNDECLARED.get().copied().unwrap_or_default();
+    let built = build_project_taking(&models, &sources, Some(undeclared), |name, query| {
+        if let Some(trees) = trees.as_deref_mut() {
+            trees.take(name, query);
+        }
+    })
+    .context("building project from SQL")?;
+    // Without --strict-refs an undeclared table is planned as external, as it
+    // always was. One spelled a single edit from a model or source is most likely
+    // a typo, so it is named; the rest are tables read on purpose.
+    for t in built.undeclared.iter().filter(|t| !t.candidates.is_empty()) {
+        eprintln!("warning: {t} It is planned as an external table; --strict-refs refuses it.");
+    }
+    let project = with_hints(built.project, &hints);
     let incremental = read_incremental(&dir.join("incremental.json"))?;
     Ok(Loaded { project, incremental })
 }
@@ -815,7 +1094,7 @@ fn load_project(dir: &Path) -> Result<Loaded> {
 /// A struct rather than a tuple because it grew a second member and every call
 /// site wants a different subset; positional `_`s would have made the next reader
 /// count commas. The materialization hints are deliberately absent: they are
-/// consumed by `build_project_with_hints` and were already discarded at every
+/// consumed by `with_hints` and were already discarded at every
 /// call site when this returned a tuple.
 struct Loaded {
     project: Project,

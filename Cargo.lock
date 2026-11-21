@@ -406,6 +406,200 @@ dependencies = [
 ]
 
 [[package]]
+name = "freshet-api"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "freshet-core",
+ "freshet-state",
+]
+
+[[package]]
+name = "freshet-bench"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "freshet-api",
+ "freshet-core",
+ "freshet-fingerprint",
+ "freshet-sql",
+ "freshet-state",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
+name = "freshet-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "freshet-api",
+ "freshet-core",
+ "freshet-dbt",
+ "freshet-embed",
+ "freshet-fingerprint",
+ "freshet-incremental",
+ "freshet-render",
+ "freshet-sql",
+ "freshet-state",
+ "freshet-state-server",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "freshet-core"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "freshet-dbt"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "freshet-core",
+ "freshet-fingerprint",
+ "freshet-sql",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
+name = "freshet-embed"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "freshet-api",
+ "freshet-core",
+ "freshet-incremental",
+ "freshet-render",
+ "freshet-sql",
+ "freshet-state",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "freshet-ffi"
+version = "0.2.0"
+dependencies = [
+ "freshet-embed",
+ "serde_json",
+]
+
+[[package]]
+name = "freshet-fingerprint"
+version = "0.2.0"
+dependencies = [
+ "freshet-core",
+ "freshet-sql",
+ "freshet-state",
+ "sqlparser",
+]
+
+[[package]]
+name = "freshet-incremental"
+version = "0.2.0"
+dependencies = [
+ "freshet-core",
+ "freshet-state",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "freshet-py"
+version = "0.2.0"
+dependencies = [
+ "freshet-embed",
+ "pyo3",
+ "pythonize",
+ "serde_json",
+]
+
+[[package]]
+name = "freshet-render"
+version = "0.2.0"
+dependencies = [
+ "freshet-core",
+ "freshet-incremental",
+ "sqlparser",
+]
+
+[[package]]
+name = "freshet-serve"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "freshet-api",
+ "freshet-core",
+ "freshet-embed",
+ "freshet-fingerprint",
+ "freshet-incremental",
+ "freshet-sql",
+ "freshet-state",
+ "notify",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+]
+
+[[package]]
+name = "freshet-sql"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "freshet-core",
+ "sqlparser",
+]
+
+[[package]]
+name = "freshet-state"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "freshet-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "freshet-state-server"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "freshet-state",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "freshet-wasm"
+version = "0.2.0"
+dependencies = [
+ "freshet-embed",
+ "js-sys",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,183 +976,6 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
-
-[[package]]
-name = "freshet-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freshet-core",
- "freshet-state",
-]
-
-[[package]]
-name = "freshet-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "freshet-api",
- "freshet-core",
- "freshet-fingerprint",
- "freshet-sql",
- "freshet-state",
- "serde",
- "serde_json",
- "sqlparser",
-]
-
-[[package]]
-name = "freshet-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "freshet-api",
- "freshet-core",
- "freshet-dbt",
- "freshet-embed",
- "freshet-fingerprint",
- "freshet-incremental",
- "freshet-render",
- "freshet-sql",
- "freshet-state",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "freshet-core"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "freshet-dbt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freshet-core",
- "freshet-fingerprint",
- "freshet-sql",
- "serde",
- "serde_json",
- "sqlparser",
-]
-
-[[package]]
-name = "freshet-embed"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freshet-api",
- "freshet-core",
- "freshet-incremental",
- "freshet-render",
- "freshet-sql",
- "freshet-state",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "freshet-ffi"
-version = "0.1.0"
-dependencies = [
- "freshet-embed",
- "serde_json",
-]
-
-[[package]]
-name = "freshet-fingerprint"
-version = "0.1.0"
-dependencies = [
- "freshet-core",
- "freshet-state",
- "sqlparser",
-]
-
-[[package]]
-name = "freshet-incremental"
-version = "0.1.0"
-dependencies = [
- "freshet-core",
- "freshet-state",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "freshet-py"
-version = "0.1.0"
-dependencies = [
- "freshet-embed",
- "pyo3",
- "pythonize",
- "serde_json",
-]
-
-[[package]]
-name = "freshet-render"
-version = "0.1.0"
-dependencies = [
- "freshet-core",
- "freshet-incremental",
- "sqlparser",
-]
-
-[[package]]
-name = "freshet-serve"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "notify",
- "freshet-api",
- "freshet-core",
- "freshet-embed",
- "freshet-fingerprint",
- "freshet-incremental",
- "freshet-sql",
- "freshet-state",
- "serde",
- "serde_json",
- "sqlparser",
- "tokio",
-]
-
-[[package]]
-name = "freshet-sql"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freshet-core",
- "sqlparser",
-]
-
-[[package]]
-name = "freshet-state"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freshet-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "freshet-wasm"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "freshet-embed",
- "serde-wasm-bindgen",
- "serde_json",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "plotters"

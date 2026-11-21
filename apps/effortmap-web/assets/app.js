@@ -2,11 +2,13 @@
  *
  * Everything with arithmetic in it lives in `effortmap.js` (pure, tested under node)
  * and everything touching the planner lives in `planner.js` (which owns the reason
- * state is handled as text). This file is the DOM.
+ * state is handled as text, and `json.js` the reason nothing here calls JSON.parse on
+ * what the planner wrote). This file is the DOM.
  */
 
 import * as em from "./effortmap.js";
 import { plan as runPlan, ready } from "./planner.js";
+import { parseExact, stringifyExact } from "./json.js";
 import { barChart } from "./charts.js";
 
 const $ = (id) => document.getElementById(id);
@@ -17,7 +19,8 @@ const state = {
   sources: {},
   materializations: {},
   plan: null,          // the parsed PlanResponse
-  priorState: null,    // RAW TEXT — never parsed; see planner.js
+  folder: null,        // a directory handle to re-read, where the browser gives one
+  priorState: null,    // RAW TEXT — stored and sent as text; see planner.js
   mode: "code",
 };
 
@@ -64,23 +67,17 @@ function renderStateStatus() {
 
 /** How many fingerprints the stored state holds, or null when that cannot be told.
  *
- *  [`rawFingerprintNames`] cuts the map out of the text with a regex rather than
- *  parsing it, so a model name containing a brace hands back a truncated fragment and
- *  the parse throws. That is a cosmetic count of an otherwise perfectly usable state,
- *  and this runs at module evaluation — an escaping throw here would abort the rest of
- *  the boot and leave every button on the page unwired over a number in a caption. */
+ *  Parsed exactly, so counting cannot round a fingerprint, though only the keys are
+ *  read. A stored state that does not parse is still the planner's to judge, and this
+ *  runs at module evaluation: an escaping throw here would abort the rest of the boot
+ *  and leave every button on the page unwired over a number in a caption. */
 function countFingerprints(raw) {
   try {
-    return Object.keys(JSON.parse(rawFingerprintNames(raw))).length;
+    const fingerprints = parseExact(raw).fingerprints;
+    return fingerprints && typeof fingerprints === "object" ? Object.keys(fingerprints).length : null;
   } catch {
     return null;
   }
-}
-
-/** The fingerprint map with every value replaced by 0, purely to count the keys.
- *  Counting must not parse the real numbers. */
-function rawFingerprintNames(raw) {
-  return raw.replace(/:\s*\d+/g, ": 0").match(/"fingerprints"\s*:\s*(\{.*?\})/s)?.[1] ?? "{}";
 }
 
 // ── loading a project ─────────────────────────────────────────────────────────
@@ -127,14 +124,15 @@ async function loadFromDirectoryHandle(handle) {
     else if (name === "materializations.json" || name === "mat.json")
       materializations = await (await entry.getFile()).text();
   }
-  applyProject(models, sources, materializations, seen);
+  return applyProject(models, sources, materializations, seen);
 }
 
+/** Take a project as the one to plan. False when there was nothing to take. */
 function applyProject(models, sourcesText, materializationsText, seen) {
   const names = Object.keys(models);
   if (!names.length) {
     note("project-status", `no .sql files among ${seen} file(s)`, "bad");
-    return;
+    return false;
   }
   state.models = models;
   if (sourcesText) $("sources").value = sourcesText.trim();
@@ -144,6 +142,7 @@ function applyProject(models, sourcesText, materializationsText, seen) {
     `${names.length} model(s): ${names.slice(0, 4).join(", ")}${names.length > 4 ? "…" : ""}`;
   $("run").disabled = false;
   refreshRestateModels();
+  return true;
 }
 
 function refreshRestateModels() {
@@ -175,6 +174,8 @@ function buildRequest() {
       }),
     sources: state.sources,
   };
+  // Only when asked, so the request is otherwise the one the golden fixture pins.
+  if ($("strict-refs").checked) request.strict_refs = true;
   if (state.mode === "restate") {
     const partitions = $("restate-partitions").value.split("\n").map((s) => s.trim()).filter(Boolean);
     if (!partitions.length) throw new Error("a restatement needs at least one partition");
@@ -467,25 +468,43 @@ $("load-example").addEventListener("click", () => {
   $("sources").value = JSON.stringify(EXAMPLE.sources, null, 2);
   $("materializations").value = JSON.stringify(EXAMPLE.materializations, null, 2);
   applyProject({ ...EXAMPLE.models }, null, null, 3);
+  state.folder = null; // the example is not the folder: re-reading would replace it
+  $("reread").hidden = true;
   $("advanced").open = true;
 });
 
 $("pick-files").addEventListener("change", (e) => loadFromFileList(e.target.files));
 
-// The File System Access API keeps a handle, so a folder can be re-read without
-// re-picking. Directory handles are Chromium-only today; everywhere else the
-// `webkitdirectory` input above is the path, which works but re-picks each time.
+// The File System Access API hands back a directory handle, which is kept so the same
+// folder can be read again after an edit with one click. Directory handles are
+// Chromium-only; everywhere else the `webkitdirectory` input above is the path, which
+// reads a folder once per pick, and the page says so rather than leaving it to be
+// discovered. Neither survives a reload: a handle could be kept in IndexedDB, but
+// Chromium asks for permission again on every visit anyway.
 if ("showDirectoryPicker" in window) {
   $("pick-files-label").hidden = true;
   const button = $("pick-dir");
   button.hidden = false;
   button.addEventListener("click", async () => {
     try {
-      await loadFromDirectoryHandle(await window.showDirectoryPicker({ mode: "read" }));
+      const folder = await window.showDirectoryPicker({ mode: "read" });
+      if (await loadFromDirectoryHandle(folder)) {
+        state.folder = folder;
+        $("reread").hidden = false;
+      }
     } catch (e) {
       if (e.name !== "AbortError") note("project-status", e.message, "bad");
     }
   });
+  $("reread").addEventListener("click", async () => {
+    try {
+      if (state.folder && (await loadFromDirectoryHandle(state.folder))) doPlan();
+    } catch (e) {
+      note("project-status", e.message, "bad");
+    }
+  });
+} else {
+  $("folder-note").hidden = false;
 }
 
 for (const radio of document.querySelectorAll('input[name="mode"]')) {
@@ -499,7 +518,7 @@ $("run").addEventListener("click", doPlan);
 $("download-queue").addEventListener("click", () =>
   download("queue.ndjson", em.queueNdjson(state.plan), "application/x-ndjson"));
 $("download-plan").addEventListener("click", () =>
-  download("plan.json", JSON.stringify(state.plan, null, 2), "application/json"));
+  download("plan.json", stringifyExact(state.plan, 2), "application/json"));
 
 $("export-state").addEventListener("click", () =>
   download("state.json", state.priorState, "application/json"));
@@ -508,7 +527,7 @@ $("import-state").addEventListener("change", async (e) => {
   if (!file) return;
   const text = (await file.text()).trim();
   try {
-    JSON.parse(text); // validity check only — the TEXT is what gets stored
+    parseExact(text); // validity check only — the TEXT is what gets stored
   } catch {
     note("state-status", "that file is not JSON", "bad");
     return;

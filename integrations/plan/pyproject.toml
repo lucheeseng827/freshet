@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshet-plan"
+dynamic = ["version"]
+description = "Read a Freshet plan the way dagron reads it: the wire contract, edges, placeholders and explanations, for any Python orchestrator."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["freshet", "planner", "backfill", "lineage", "incremental", "orchestration"]
+# None, and that is the package's reason to exist: it goes into a scheduler's
+# environment beside Airflow or Dagster without giving pip anything to re-resolve.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/lucheeseng827/freshet"
+
+[tool.setuptools]
+packages = ["freshet_plan"]
+
+[tool.setuptools.dynamic]
+version = { attr = "freshet_plan.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -149,7 +149,7 @@ impl Stage {
 fn reaches(d: Dialect) -> &'static [Scheme] {
     match d {
         // DuckDB, through httpfs and its credential chain, or a local path.
-        Dialect::Postgres => &[Scheme::S3, Scheme::File],
+        Dialect::Postgres => &[Scheme::S3, Scheme::Gcs, Scheme::File],
         Dialect::Redshift => &[Scheme::S3],
         Dialect::Snowflake | Dialect::Databricks => &[Scheme::S3, Scheme::Gcs],
         Dialect::BigQuery => &[Scheme::Gcs],
@@ -515,15 +515,18 @@ fn select(s: &SideNames) -> String {
 /// credentials, and the attached database. `read_only` for an unload.
 fn duckdb_preamble(stage: &Stage, read_only: bool) -> Vec<String> {
     let mut s = vec!["INSTALL postgres".to_string(), "LOAD postgres".to_string()];
-    if stage.scheme == Scheme::S3 {
-        s.extend([
-            "INSTALL httpfs".to_string(),
-            "LOAD httpfs".to_string(),
-            "INSTALL aws".to_string(),
-            "LOAD aws".to_string(),
-            // The task's AWS environment or instance role: nothing in the SQL.
-            "CREATE OR REPLACE SECRET freshet_stage (TYPE s3, PROVIDER credential_chain)".to_string(),
-        ]);
+    // Object storage through httpfs, with the credential chain the `aws` extension
+    // provides. Nothing in the SQL: on S3 it is the task's AWS environment or
+    // instance role. On GCS it is an HMAC key for Google's S3-interoperable API,
+    // which DuckDB's GCS secret reads from AWS_ACCESS_KEY_ID and
+    // AWS_SECRET_ACCESS_KEY on the task.
+    let secret = match stage.scheme {
+        Scheme::S3 => Some("CREATE OR REPLACE SECRET freshet_stage (TYPE s3, PROVIDER credential_chain)"),
+        Scheme::Gcs => Some("CREATE OR REPLACE SECRET freshet_stage (TYPE gcs, PROVIDER credential_chain)"),
+        Scheme::File => None,
+    };
+    if let Some(secret) = secret {
+        s.extend(["INSTALL httpfs", "LOAD httpfs", "INSTALL aws", "LOAD aws", secret].map(String::from));
     }
     // '' is libpq's environment: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD.
     let mode = if read_only { ", READ_ONLY" } else { "" };
@@ -551,7 +554,7 @@ fn unload(s: &SideNames, opts: &MoveOptions, dir: &str) -> StepSql {
             stmts.push(match opts.stage.scheme {
                 // One file at a fixed name: object storage needs no directory, and a
                 // rerun overwrites exactly what the first run wrote.
-                Scheme::S3 => format!("COPY ({}) TO '{loc}data_0.parquet' (FORMAT parquet)", select(s)),
+                Scheme::S3 | Scheme::Gcs => format!("COPY ({}) TO '{loc}data_0.parquet' (FORMAT parquet)", select(s)),
                 // DuckDB makes the directory and, with OVERWRITE, empties it first.
                 _ => format!(
                     "COPY ({}) TO '{}' (FORMAT parquet, PER_THREAD_OUTPUT true, OVERWRITE true)",
@@ -880,6 +883,29 @@ mod tests {
             IAM_ROLE 'arn:aws:iam::123456789012:role/freshet-move'\nFORMAT AS PARQUET");
     }
 
+    /// Postgres reaches GCS through DuckDB's GCS secret, so Postgres to BigQuery is
+    /// one hop, either way round.
+    #[test]
+    fn postgres_and_bigquery_meet_on_a_gcs_stage() {
+        let p = plan(&[("events", Some(&["2026-06-20"]))]);
+        let there = render_move(&project(), &p, &cfg(), &opts(Dialect::Postgres, Dialect::BigQuery, "gs://acme/m/")).unwrap();
+        let u = &there.units[0];
+        assert_eq!(u.unload.engine, "duckdb");
+        assert!(u.unload.statements.contains(&"CREATE OR REPLACE SECRET freshet_stage (TYPE gcs, PROVIDER credential_chain)".to_string()), "{:?}", u.unload.statements);
+        assert!(u.unload.statements.contains(&"LOAD httpfs".to_string()));
+        assert_eq!(
+            u.unload.statements.last().unwrap(),
+            "COPY (SELECT dt, user_id, amount FROM freshet_pg.public.events WHERE dt IN (DATE '2026-06-20')) \
+             TO 'gs://acme/m/events.dt=2026-06-20/data_0.parquet' (FORMAT parquet)"
+        );
+        assert!(u.load.statements.iter().any(|s| s.contains("uris = ['gs://acme/m/events.dt=2026-06-20/*.parquet']")), "{:?}", u.load.statements);
+
+        let back = render_move(&project(), &p, &cfg(), &opts(Dialect::BigQuery, Dialect::Postgres, "gs://acme/m/")).unwrap();
+        let load = &back.units[0].load.statements;
+        assert!(load.contains(&"CREATE OR REPLACE SECRET freshet_stage (TYPE gcs, PROVIDER credential_chain)".to_string()), "{load:?}");
+        assert!(load.iter().any(|s| s.contains("read_parquet('gs://acme/m/events.dt=2026-06-20/*.parquet')")), "{load:?}");
+    }
+
     #[test]
     fn a_stage_a_side_cannot_reach_is_refused_before_anything_is_rendered() {
         let p = plan(&[("events", Some(&["2026-06-20"]))]);
@@ -887,6 +913,9 @@ mod tests {
         assert!(e.contains("the target, bigquery, cannot reach a s3:// stage; it reaches gs://"), "{e}");
         let e = render_move(&project(), &p, &cfg(), &opts(Dialect::Redshift, Dialect::Postgres, "file:///srv/m/")).unwrap_err().to_string();
         assert!(e.contains("the source, redshift"), "{e}");
+        // No stage both reach: Redshift to BigQuery still moves in two hops.
+        let e = render_move(&project(), &p, &cfg(), &opts(Dialect::Redshift, Dialect::BigQuery, "gs://b/m/")).unwrap_err().to_string();
+        assert!(e.contains("the source, redshift, cannot reach a gs:// stage") && e.contains("two hops"), "{e}");
         let mut o = opts(Dialect::Postgres, Dialect::Snowflake, "s3://b/m/");
         o.from_schema = Some("db.public".into());
         assert!(render_move(&project(), &p, &cfg(), &o).unwrap_err().to_string().contains("its schema is one name"));

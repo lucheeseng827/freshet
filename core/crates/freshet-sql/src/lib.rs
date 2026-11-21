@@ -31,6 +31,11 @@
 //!   column may depend on anything this model reads". Uncertainty is never merged
 //!   away: a union branch, a CTE column or a row filter that is uncertain makes
 //!   every column it feeds uncertain too.
+//! * A table that is neither a model nor a declared source is **external**: read,
+//!   never a dependency. That is the one place a typo is silent — `from stgg`,
+//!   meaning the model `stg`, loses the edge to `stg` and the plan runs the two side
+//!   by side — so [`build_project_with`] reports every such table, with the models
+//!   and sources within one edit of it, and [`Undeclared::Refuse`] refuses them.
 //!
 //! ## Scope
 //!
@@ -49,12 +54,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use freshet_core::{Column, ColumnRef, Materialization, Model, Project};
 use sqlparser::ast::{
     Distinct, ExcludeSelectItem, Expr, GroupByExpr, Ident, JoinConstraint, JoinOperator,
-    ObjectName, OrderByExpr, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator,
+    ObjectName, OrderByExpr, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator,
     SetQuantifier, Statement, TableAlias, TableFactor, TableWithJoins, TopQuantity, Value, Visit,
     Visitor, WildcardAdditionalOptions,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+
+/// The parsed query [`build_project_taking`] hands over: `sqlparser`'s own type,
+/// re-exported so a caller names exactly the version this crate parsed with.
+pub use sqlparser::ast::Query;
 
 /// Maps a table/model name to its output column names. Seeded with source
 /// (external) tables; grown with each model's derived columns as a project builds.
@@ -75,7 +84,8 @@ pub struct ModelLineage {
 ///   referenced, e.g. seed sources, is treated as external and excluded from
 ///   `depends_on`).
 /// * `catalog` — known output columns per source/model, for wildcard expansion and
-///   unqualified-reference resolution.
+///   unqualified-reference resolution. An empty list declares a table without its
+///   columns: they are unknown, exactly as for a table the catalog does not name.
 pub fn analyze(
     sql: &str,
     known_models: &BTreeSet<String>,
@@ -114,7 +124,131 @@ fn lineage_of(
 /// Build a fully-linked [`Project`] from `(name, sql)` pairs and a seed catalog of
 /// source-table schemas. Resolves in dependency order so each model's output
 /// columns are known before its downstreams are analyzed.
+///
+/// A table that is neither a model nor a source is planned as external; see
+/// [`build_project_with`] to hear about it or refuse it.
 pub fn build_project(models: &[(String, String)], sources: &Catalog) -> Result<Project> {
+    build(models, sources, None, &mut |_, _| {}).map(|built| built.project)
+}
+
+/// What [`build_project_with`] does with a table that is neither a model nor a
+/// declared source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Undeclared {
+    /// Plan it as an external table, read but never a dependency, and report it on
+    /// [`Built::undeclared`]. The default, because a project may read tables nobody
+    /// declared.
+    #[default]
+    External,
+    /// Refuse the project with [`UndeclaredTables`]: only a declared source is
+    /// external. For CI, where a misspelled model must fail the build rather than
+    /// become an external table that the plan runs beside the model it meant.
+    Refuse,
+}
+
+/// A project, and the tables its models read that it does not declare.
+#[derive(Debug)]
+pub struct Built {
+    pub project: Project,
+    /// Model by model, in the order the models were given.
+    pub undeclared: Vec<UndeclaredTable>,
+}
+
+/// A table a model reads that is neither a model nor a declared source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndeclaredTable {
+    pub model: String,
+    /// As the SQL writes it, qualified or not.
+    pub table: String,
+    /// The models and sources within one edit of it, ignoring case, closest first
+    /// and at most three: what a typo most likely meant. Empty when nothing is.
+    pub candidates: Vec<String>,
+}
+
+impl std::fmt::Display for UndeclaredTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "model `{}` reads `{}`, which is neither a model nor a declared source",
+            self.model, self.table
+        )?;
+        let quoted: Vec<String> = self.candidates.iter().map(|c| format!("`{c}`")).collect();
+        match quoted.as_slice() {
+            [] => Ok(()),
+            [one] => write!(f, ": did you mean {one}?"),
+            [rest @ .., last] => write!(f, ": did you mean {} or {last}?", rest.join(", ")),
+        }
+    }
+}
+
+/// What [`Undeclared::Refuse`] fails with: every undeclared table at once, so one
+/// run is enough to fix them all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndeclaredTables(pub Vec<UndeclaredTable>);
+
+impl std::fmt::Display for UndeclaredTables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.as_slice() {
+            [one] => write!(f, "{one}")?,
+            all => {
+                write!(
+                    f,
+                    "{} tables are neither models nor declared sources:",
+                    all.len()
+                )?;
+                for t in all {
+                    write!(f, "\n  {t}")?;
+                }
+            }
+        }
+        write!(
+            f,
+            "\n(a table read on purpose is declared as a source; an empty column list \
+             declares it without its columns)"
+        )
+    }
+}
+
+impl std::error::Error for UndeclaredTables {}
+
+/// [`build_project`], also reporting each table that is neither a model nor a
+/// declared source, or refusing the project over them ([`Undeclared::Refuse`]).
+pub fn build_project_with(
+    models: &[(String, String)],
+    sources: &Catalog,
+    undeclared: Undeclared,
+) -> Result<Built> {
+    build(models, sources, Some(undeclared), &mut |_, _| {})
+}
+
+/// [`build_project_with`], handing each model's parsed query to `take` as soon as
+/// the build is done with it, rather than dropping it: for a caller that reads the
+/// SQL again as a tree (the AST fingerprint, what a model reads), so it need not
+/// parse every model a second time. At 100,000 models that second parse was 2 of
+/// the 10 seconds a plan took. `undeclared: None` skips looking for undeclared
+/// tables, as [`build_project`] does, and leaves [`Built::undeclared`] empty.
+///
+/// Each query is handed over by value, and right after its own model is analyzed,
+/// so `take` decides how long it lives: keeping the trees past the build cost more,
+/// in fresh memory for everything allocated after it, than parsing them again did.
+/// The query is exactly what `sqlparser`'s generic dialect makes of the model's SQL.
+pub fn build_project_taking(
+    models: &[(String, String)],
+    sources: &Catalog,
+    undeclared: Option<Undeclared>,
+    mut take: impl FnMut(&str, Query),
+) -> Result<Built> {
+    build(models, sources, undeclared, &mut take)
+}
+
+/// `check: None` skips looking for undeclared tables, which [`build_project`]
+/// never reports: its callers, the benchmarks among them, pay nothing for it.
+fn build(
+    models: &[(String, String)],
+    sources: &Catalog,
+    check: Option<Undeclared>,
+    take: &mut dyn FnMut(&str, Query),
+) -> Result<Built> {
     let mut known: BTreeSet<String> = BTreeSet::new();
     for (name, _) in models {
         if !known.insert(name.clone()) {
@@ -123,28 +257,46 @@ pub fn build_project(models: &[(String, String)], sources: &Catalog) -> Result<P
     }
 
     let models_folded = Fold::Index(Folded::of(&known));
+    let mut catalog_folded = Fold::Index(Folded::of(sources.keys()));
 
     // Pass 1: model-level deps only (no catalog needed) → topo order.
     let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut parsed: BTreeMap<String, (Query, &String)> = BTreeMap::new();
+    let mut unread: Vec<(&String, String, String)> = Vec::new();
     for (name, sql) in models {
         let q = parse_single_query(sql).with_context(|| format!("parsing model `{name}`"))?;
         deps.insert(
             name.clone(),
             referenced_models_in(&q, &known, &models_folded),
         );
+        if check.is_some() {
+            for table in tables_read(&q) {
+                let Some(last) = table.0.last() else { continue };
+                if models_folded.resolve(&known, last).is_empty()
+                    && catalog_folded.resolve(sources, last).is_empty()
+                {
+                    unread.push((name, table.to_string(), last.value.clone()));
+                }
+            }
+        }
         parsed.insert(name.clone(), (q, sql));
+    }
+    let undeclared = with_candidates(unread, &known, sources);
+    if check == Some(Undeclared::Refuse) && !undeclared.is_empty() {
+        return Err(UndeclaredTables(undeclared).into());
     }
     let order = topo_order(&known, &deps)?;
 
     // Pass 2: analyze in order, growing the catalog with each model's columns.
     let mut catalog: Catalog = sources.clone();
-    let mut catalog_folded = Fold::Index(Folded::of(catalog.keys()));
     let mut built: Vec<Model> = Vec::with_capacity(models.len());
     for name in &order {
-        let (query, sql) = &parsed[name];
-        let lineage = lineage_of(query, &known, &models_folded, &catalog, &catalog_folded)
+        // Removed, not borrowed: each tree is freed (or handed over) as soon as its
+        // model is analyzed, so what is allocated next reuses its memory.
+        let (query, sql) = parsed.remove(name).expect("the order lists known models");
+        let lineage = lineage_of(&query, &known, &models_folded, &catalog, &catalog_folded)
             .with_context(|| format!("analyzing model `{name}`"))?;
+        take(name, query);
         catalog.insert(
             name.clone(),
             lineage.columns.iter().map(|c| c.name.clone()).collect(),
@@ -152,13 +304,16 @@ pub fn build_project(models: &[(String, String)], sources: &Catalog) -> Result<P
         catalog_folded.insert(name);
         built.push(Model {
             name: name.clone(),
-            sql: (*sql).clone(),
+            sql: sql.clone(),
             materialization: Materialization::Table,
             columns: lineage.columns,
             depends_on: lineage.depends_on,
         });
     }
-    Ok(Project::from_models(built))
+    Ok(Built {
+        project: Project::from_models(built),
+        undeclared,
+    })
 }
 
 // ---- parsing helpers -------------------------------------------------------
@@ -254,6 +409,237 @@ fn same_ident(a: &Ident, b: &Ident) -> bool {
         || (a.quote_style.is_none()
             && b.quote_style.is_none()
             && a.value.eq_ignore_ascii_case(&b.value))
+}
+
+// ---- undeclared tables -----------------------------------------------------
+
+/// Each table `query` reads that SQL resolves to no CTE, once, as written: the
+/// names a project must know as a model or a declared source. A table function
+/// (`FROM f(…)`) is not a table.
+///
+/// CTEs are scoped exactly as SQL scopes them: visible to the CTEs after them (to
+/// their own body too under `WITH RECURSIVE`), to the main query, and to every
+/// query nested inside those. [`referenced_models_in`] can afford to ignore nested
+/// CTEs because it may over-attribute; here a CTE taken for a table is a false
+/// refusal, and a table taken for a CTE is a typo never reported.
+fn tables_read(query: &Query) -> Vec<ObjectName> {
+    let mut walk = TablesRead::default();
+    let _ = query.visit(&mut walk);
+    walk.found
+}
+
+#[derive(Default)]
+struct TablesRead {
+    /// One per query being walked, innermost last.
+    scopes: Vec<CteScope>,
+    found: Vec<ObjectName>,
+}
+
+struct CteScope {
+    names: Vec<Ident>,
+    /// Each CTE's body, to recognize it when the walk enters it. Compared by
+    /// address only, never read through.
+    bodies: Vec<*const Query>,
+    recursive: bool,
+    /// How many of `names` are in scope: all of them, except while walking a CTE
+    /// body, which sees only the CTEs before it.
+    visible: usize,
+}
+
+impl Visitor for TablesRead {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        if let Some(outer) = self.scopes.last_mut() {
+            if let Some(i) = outer.bodies.iter().position(|b| std::ptr::eq(*b, query)) {
+                outer.visible = if outer.recursive {
+                    outer.names.len()
+                } else {
+                    i
+                };
+            }
+        }
+        let ctes = query
+            .with
+            .as_ref()
+            .map(|w| &w.cte_tables[..])
+            .unwrap_or_default();
+        self.scopes.push(CteScope {
+            names: ctes.iter().map(|c| c.alias.name.clone()).collect(),
+            bodies: ctes.iter().map(|c| &*c.query as *const Query).collect(),
+            recursive: query.with.as_ref().is_some_and(|w| w.recursive),
+            visible: ctes.len(),
+        });
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        self.scopes.pop();
+        if let Some(outer) = self.scopes.last_mut() {
+            if outer.bodies.iter().any(|b| std::ptr::eq(*b, query)) {
+                outer.visible = outer.names.len();
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+        let TableFactor::Table {
+            name, args: None, ..
+        } = factor
+        else {
+            return ControlFlow::Continue(());
+        };
+        // Only an unqualified name can be a CTE.
+        let cte = match name.0.as_slice() {
+            [single] => self
+                .scopes
+                .iter()
+                .any(|s| s.names[..s.visible].iter().any(|n| same_ident(n, single))),
+            _ => false,
+        };
+        if !cte && !self.found.contains(name) {
+            self.found.push(name.clone());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Attach to each `(model, table as written, its last part)` the models and sources
+/// spelled closest to that last part, computed once per distinct name.
+fn with_candidates(
+    unread: Vec<(&String, String, String)>,
+    models: &BTreeSet<String>,
+    sources: &Catalog,
+) -> Vec<UndeclaredTable> {
+    if unread.is_empty() {
+        return Vec::new();
+    }
+    let index = Spellings::of(models.iter().chain(sources.keys()));
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    unread
+        .into_iter()
+        .map(|(model, table, last)| {
+            let candidates = seen
+                .entry(last)
+                .or_insert_with_key(|last| index.within_one_edit(last))
+                .clone();
+            UndeclaredTable {
+                model: model.clone(),
+                table,
+                candidates,
+            }
+        })
+        .collect()
+}
+
+/// Every model and source name, findable by any name one edit away from it.
+///
+/// One edit (an insertion, a deletion, a substitution or an adjacent swap,
+/// ignoring case) is what a typo almost always is, and it can be indexed: two
+/// names within one edit share a spelling with at most one character deleted from
+/// each. So each name is filed under itself and each of its one-deletions, and a
+/// lookup costs the length of the name looked up, not the size of the project.
+/// Comparing every undeclared table with every model is quadratic, and a project
+/// of 100,000 models reading 2,000 undeclared tables spent over a minute on it.
+struct Spellings<'a> {
+    names: Vec<(Vec<char>, &'a String)>,
+    /// A spelling's hash → the names filed under it. Collisions are harmless: every
+    /// hit is checked with [`edits_within`].
+    filed: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl<'a> Spellings<'a> {
+    fn of(names: impl Iterator<Item = &'a String>) -> Self {
+        let mut index = Spellings {
+            names: Vec::new(),
+            filed: std::collections::HashMap::new(),
+        };
+        for name in names.collect::<BTreeSet<_>>() {
+            let lower: Vec<char> = name.to_lowercase().chars().collect();
+            let at = u32::try_from(index.names.len()).expect("fewer than 2^32 names");
+            for key in spellings(&lower) {
+                let slot = index.filed.entry(key).or_default();
+                if slot.last() != Some(&at) {
+                    slot.push(at);
+                }
+            }
+            index.names.push((lower, name));
+        }
+        index
+    }
+
+    /// The names within one edit of `table`, closest first, at most three.
+    fn within_one_edit(&self, table: &str) -> Vec<String> {
+        let want: Vec<char> = table.to_lowercase().chars().collect();
+        let hits: BTreeSet<u32> = spellings(&want)
+            .filter_map(|key| self.filed.get(&key))
+            .flatten()
+            .copied()
+            .collect();
+        let mut close: Vec<(usize, &String)> = hits
+            .into_iter()
+            .filter_map(|at| {
+                let (lower, name) = &self.names[at as usize];
+                Some((edits_within(&want, lower, 1)?, *name))
+            })
+            .collect();
+        close.sort();
+        close.truncate(3);
+        close.into_iter().map(|(_, n)| n.clone()).collect()
+    }
+}
+
+/// The hashes of `word` and of each spelling of it with one character deleted.
+fn spellings(word: &[char]) -> impl Iterator<Item = u64> + '_ {
+    use std::hash::{Hash, Hasher};
+    (0..=word.len()).map(move |skip| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (i, c) in word.iter().enumerate() {
+            if i != skip {
+                c.hash(&mut h);
+            }
+        }
+        h.finish()
+    })
+}
+
+/// The edit distance from `a` to `b` — insertions, deletions, substitutions and
+/// adjacent swaps — when it is at most `bound`.
+///
+/// Only the cells within `bound` of the diagonal can stay within `bound`, and once
+/// a whole row exceeds it so does every later row: a name far from `a` is given up
+/// on in a few characters, which is what makes checking every model affordable.
+fn edits_within(a: &[char], b: &[char], bound: usize) -> Option<usize> {
+    if a.len().abs_diff(b.len()) > bound {
+        return None;
+    }
+    let over = bound + 1;
+    // Rows of the optimal-string-alignment table: two back, one back, this one.
+    let mut before = vec![over; b.len() + 1];
+    let mut prev: Vec<usize> = (0..=b.len()).map(|j| j.min(over)).collect();
+    let mut row = vec![over; b.len() + 1];
+    for i in 1..=a.len() {
+        row.fill(over);
+        row[0] = i.min(over);
+        let mut least = row[0];
+        for j in i.saturating_sub(bound).max(1)..=(i + bound).min(b.len()) {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut d = (prev[j] + 1).min(row[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(before[j - 2] + 1);
+            }
+            row[j] = d.min(over);
+            least = least.min(row[j]);
+        }
+        if least > bound {
+            return None;
+        }
+        std::mem::swap(&mut before, &mut prev);
+        std::mem::swap(&mut prev, &mut row);
+    }
+    let d = prev[b.len()];
+    (d <= bound).then_some(d)
 }
 
 /// A set of names a relation can resolve to: the models, or the catalog's tables.
@@ -897,7 +1283,8 @@ fn expand_source(idx: usize, src: &Source) -> Result<Vec<ProjCol>> {
         SourceKind::Real { name, known } => {
             let cols = known.as_ref().ok_or_else(|| {
                 anyhow!(
-                    "cannot expand `*` over `{}`: its schema is unknown (declare it as a source)",
+                    "cannot expand `*` over `{}`: its schema is unknown (declare it as a source, \
+                     with its columns)",
                     name
                 )
             })?;
@@ -1083,7 +1470,14 @@ fn add_table_factor<'q>(
                         .or(tables.first())
                         .cloned()
                         .unwrap_or_else(|| last.value.clone());
-                    let known = cx.catalog.get(&name).cloned();
+                    // An empty list declares a *source* without its columns. A model's
+                    // list is the planner's own reading, and an empty one (a VALUES body)
+                    // is known to be empty, as it always was.
+                    let known = cx
+                        .catalog
+                        .get(&name)
+                        .filter(|cols| !cols.is_empty() || cx.models.contains(&name))
+                        .cloned();
                     match (alias, known) {
                         _ if ambiguous => SourceKind::Opaque,
                         // `FROM t AS x (a, b)` renames t's columns: a local view of it.

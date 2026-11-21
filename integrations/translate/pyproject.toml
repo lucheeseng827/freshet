@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshet-translate"
+dynamic = ["version"]
+description = "Translate a Freshet project's SQL to another warehouse with sqlglot, and let Freshet name the models the translation changed."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["freshet", "sqlglot", "sql", "translation", "migration", "warehouse", "planner"]
+# sqlglot is the translator. The freshet CLI, which classifies the result, is a
+# binary rather than a Python dependency: install it with cargo, a release download
+# or the docker image, and point FRESHET at it if it is not on PATH.
+#
+# The floor is the oldest sqlglot the tests pass on. 25.x has the same API, but it
+# writes constructs Snowflake cannot run where later versions refuse them.
+dependencies = ["sqlglot>=27"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+freshet-translate = "freshet_translate.cli:main"
+
+[project.urls]
+Repository = "https://github.com/lucheeseng827/freshet"
+
+[tool.setuptools]
+packages = ["freshet_translate"]
+
+# Single source of truth for the version: `freshet_translate.__version__`.
+[tool.setuptools.dynamic]
+version = { attr = "freshet_translate.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets `pytest` run from this directory against the source tree, without an install.
+pythonpath = ["."]
